@@ -140,9 +140,9 @@ First establish which kind of gap it is:
 - **A bare apex domain on a `.do`/`.ai`/`.rs`/`.sh` TLD**: expected.
   Use `rules block --domain`.
 - **Your folder name**: see above.
-- **Anything else**: this is a bug. Report it privately through
-  [SECURITY.md](https://github.com/CSPF-Founder/redactproxy/blob/main/SECURITY.md),
-  not the public issue tracker.
+- **Anything else**: this is a bug. Open an
+  [issue](https://github.com/CSPF-Founder/redactproxy/issues), and
+  describe the shape of the value rather than the value itself.
 
 Then, regardless: a value that already reached the model stays in that
 conversation, and can be restated permanently in a `thinking` block that
@@ -249,8 +249,9 @@ seen?" without writing anything new to disk.
 
 ## Reporting a bug
 
-Include `redactproxy version`. Bug reports go to the
-[issue tracker](https://github.com/CSPF-Founder/redactproxy/issues).
-Suspected redaction leaks go privately through
+Include `redactproxy version`. Bug reports, including suspected
+redaction leaks, go to the [issue
+tracker](https://github.com/CSPF-Founder/redactproxy/issues), and should
+not themselves contain client data.
 [SECURITY.md](https://github.com/CSPF-Founder/redactproxy/blob/main/SECURITY.md)
-instead, and should not themselves contain client data.
+lists what to report privately instead.

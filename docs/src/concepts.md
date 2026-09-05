@@ -84,8 +84,7 @@ in it:
 ## Stability
 
 A given real value always maps to the same placeholder for the life of
-an engagement. This is not incidental; it is the reason the tool is
-usable at all.
+an engagement.
 
 Claude can still reason that `tok1a2b3c4d5e6f7890.com` and
 `mail.tok1a2b3c4d5e6f7890.com` belong to the same organization, that a
@@ -137,9 +136,22 @@ Deliberately not scanned:
   Anthropic's own infrastructure and never carry local client data.
 - Images and documents, which are binary payloads rather than text.
 
-MCP tool calls and results **are** scanned. An MCP server is local
-infrastructure you control, and its output is exactly the kind of real
-client data this proxy exists to keep off the wire.
+MCP tool calls and results **are** scanned, unlike the server-executed
+blocks above. What separates them is where the tool runs: web search and
+code execution run on Anthropic's own infrastructure, while an MCP
+server is local infrastructure you control (a database query tool, an
+internal API client, a custom tool of your own), and its output is
+exactly the kind of real client data this proxy exists to keep off the
+wire.
+
+The proxy sits between Claude Code and the API, never between Claude
+Code and your MCP server.
+The local connection to that server is not intercepted, not blocked, and
+not modified. What gets scanned is the copy of the exchange carried in
+the API body: an `mcp_tool_result` is tokenized on the way out, and an
+`mcp_tool_use` in a response is detokenized before Claude Code executes
+it, so the MCP server itself receives the real values, exactly as `Bash`
+does.
 
 The rewrite is surgical: only the matched spans change, and every other
 byte, including JSON key order, is preserved. That matters because
@@ -152,7 +164,7 @@ There is no model in the loop, no network call, and no learning. A
 detector is a pattern plus a validation step, and the full set is in
 [Detector categories](./reference/categories.md).
 
-The consequences are worth internalizing:
+What follows from that:
 
 - **Shapes get caught, prose does not.** An IP, an email, an API key, a
   domain: caught. A client's name, a codename, a project name: not
@@ -177,12 +189,24 @@ the request instead of passing it through.
 
 ## Cost
 
-Scan results are cached by content hash, so you pay per distinct string,
-once. Conversation history is resent every turn, so most of a typical
-request is cache hits.
+Scanning a body is the expensive part, so results are cached by content
+hash: any given string is scanned once, however many times you send it.
+Claude Code resends the whole conversation every turn, so after the
+first turn most of a request is cache hits and costs close to nothing to
+redact.
 
-The exception is a body that mints hundreds of new values at once, a
-full-subnet `nmap` the first time you run it being the obvious one. Each
-value is its own committed write, which is what makes the store
-crash-safe and what turns milliseconds into seconds. Sending the same
-output again costs nothing.
+Two things are not cached.
+
+The first is minting a token for a value the store has never seen. Each
+new value is its own committed write, which is what lets the store
+survive being killed at any point without losing the mapping for a value
+already sent to the model. A body that discovers hundreds of new values
+at once, the first run of a full-subnet `nmap` being the obvious case,
+pays all of those writes in one request and can visibly stall it.
+Sending the same output again is free, because by then every value is
+known and the scan itself is cached.
+
+The second is the response direction. Detokenizing scans for
+placeholders every time, with no equivalent cache, because the model can
+return known placeholders in any arrangement it likes. That cost scales
+with response size rather than with how much you have redacted so far.

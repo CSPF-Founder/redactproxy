@@ -3,9 +3,11 @@
 Thanks for taking a look. New detectors, false-positive reports, and
 blind spots nobody has written down yet are all welcome.
 
-Suspected redaction leaks go through [SECURITY.md](SECURITY.md), not the
-issue tracker. "This real value reached the model unredacted" is a
-confidentiality bug, so please report it privately first.
+Suspected redaction leaks belong in the issue tracker like any other
+bug. The proxy is loopback-only and the value went to the provider you
+were already talking to, so there is nothing to embargo and a public
+report is the one other people can find. [SECURITY.md](SECURITY.md)
+covers the narrower set of things to report privately instead.
 
 ## Getting set up
 
@@ -17,14 +19,6 @@ git clone https://github.com/CSPF-Founder/redactproxy.git
 cd redactproxy
 make build            # bin/redactproxy
 make check            # vet + race
-```
-
-To try a change end to end, point a scratch engagement at a data
-directory you can throw away, so you never risk touching real
-engagement state:
-
-```bash
-./bin/redactproxy --engagement scratch --data-dir /tmp/rp-scratch
 ```
 
 ## Where things live
@@ -76,10 +70,9 @@ something you added.
 Production code gets no exemption, including the default ones
 golangci-lint would otherwise apply on its own (see the comment in
 `.golangci.yml`). An error you genuinely cannot act on is discarded
-explicitly, `_ = f.Close()`, with a short reason. That is not a
-formality: writing it out is what separates "closing this read handle
-can't tell me anything" from "this Close is where a failed write would
-have surfaced". Prefer checking it when a buffer is involved, since that
+explicitly, `_ = f.Close()`, with a short reason. Writing the reason out
+is what separates "closing this read handle can't tell me anything" from
+"this Close is where a failed write would have surfaced". Prefer checking it when a buffer is involved, since that
 is where the second case hides.
 
 Install golangci-lint with the same toolchain this module targets:
@@ -88,10 +81,10 @@ Install golangci-lint with the same toolchain this module targets:
 go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
 ```
 
-That version is not incidental. golangci-lint embeds a Go type-checker at
-build time and refuses to run against a module targeting a newer Go than
-it was built with, so a binary from a distro package or an older tarball
-can fail outright where this one works. CI pins the same version.
+golangci-lint embeds a Go type-checker at build time and refuses to run
+against a module targeting a newer Go than it was built with, so a
+binary from a distro package or an older tarball can fail outright where
+this one works. CI pins the same version.
 
 govulncheck fails on a vulnerable *toolchain*, not just a vulnerable
 dependency, which is why `go.mod` pins a patch-level Go version rather

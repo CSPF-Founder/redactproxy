@@ -66,6 +66,24 @@ structure-preserving domain treatment described in
 [Rules](./rules.md#blocking-a-domain), the same as
 `rules block --domain`.
 
+Right after this prompt the wizard checks the folder you are standing in
+against the rules you just entered. `~/engagements/eng-2026-014` doesn't
+contain any of them, so nothing is printed here and the wizard moves
+straight on to the next question.
+
+If the folder were named after the client, say
+`~/clients/xyzcorp-pentest`, its name would contain a value you just
+asked to have redacted, and the wizard would print this instead:
+
+```text
+WARNING: this folder's path ("/home/you/clients/xyzcorp-pentest") currently matches your own block-list pattern "(?i)xyzcorp":
+it WILL be sent unredacted on every request from here. Consider a different folder name.
+```
+
+That is the folder-naming problem from the top of this page, caught
+after the fact. Renaming the folder is the only fix; no rule can cover
+it. See [Known gaps](./security/gaps.md).
+
 ### 3. Which API this engagement talks to
 
 ```text

@@ -10,10 +10,7 @@ separate commands, never guessed from the argument:
 - A **value** is a literal string or regex you add yourself. You
   `block` or `allow` it.
 
-Guessing between the two was considered and rejected. Running
-`rules block pan` meaning to turn off the `india_pii.pan` detector would
-otherwise add a dangerously broad substring block on the word "pan".
-The commands do warn when a value you block happens to match a category
+The commands warn when a value you block happens to match a category
 name.
 
 ## Changes apply live

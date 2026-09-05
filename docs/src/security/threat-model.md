@@ -109,7 +109,12 @@ explicitly, because they look like they should be covered:
 
 ## Reporting a leak
 
-"This real value reached the model unredacted" is a confidentiality bug.
-Report it privately through
-[SECURITY.md](https://github.com/CSPF-Founder/redactproxy/blob/main/SECURITY.md),
-not the public issue tracker.
+"This real value reached the model unredacted" is a bug in a detector.
+It goes in the public [issue
+tracker](https://github.com/CSPF-Founder/redactproxy/issues), described
+by the shape of the value rather than the value itself.
+[SECURITY.md](https://github.com/CSPF-Founder/redactproxy/blob/main/SECURITY.md)
+lists what to report privately instead: findings where the proxy itself
+is the way in, such as code execution from a body it parses, an escape
+from the loopback bind, or another local process reading real values
+back out of it.

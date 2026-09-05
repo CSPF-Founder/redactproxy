@@ -18,9 +18,8 @@ Every subcommand takes `-h`.
 > rather than run a read-only command, and
 > `rules block xyzcorp-fixture.internal --domain` would treat
 > `--domain` as a second positional argument. Both are caught and
-> explained rather than silently doing the wrong thing, but the ordering
-> rule is worth internalizing:
-> `redactproxy rules block --domain xyzcorp-fixture.internal`.
+> explained rather than silently doing the wrong thing. The correct
+> order is `redactproxy rules block --domain xyzcorp-fixture.internal`.
 
 ## Shared flags
 

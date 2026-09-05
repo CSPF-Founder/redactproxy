@@ -63,10 +63,11 @@ shared default is exactly how two clients end up in one token store.
 
 ## Crash safety
 
-`tokens.db` is crash-consistent. A value committed to disk survives an
-abrupt kill, not just a clean shutdown. A request in flight when the
-process dies fails or times out like any other network interruption;
-nothing ends up corrupted or silently mismapped.
+`tokens.db` survives an abrupt kill, not just a clean shutdown. A new
+mapping is written and flushed to it before the placeholder is used in a
+request, so the proxy can never be killed holding a token that isn't on
+disk. Everything minted in earlier runs is still there when you restart;
+only the request in flight is lost.
 
 This is also why minting a large batch of new values is slower than
 re-sending the same content: each value is its own committed write.

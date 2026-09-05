@@ -90,7 +90,7 @@ a config option. See CONTRIBUTING.md's "Adding a provider".
 ## Why `ANTHROPIC_API_KEY` gets blanked
 
 Picking z.ai or manual sets `ANTHROPIC_API_KEY` to an empty string in
-the folder's env block. This is deliberate and worth understanding.
+the folder's env block.
 
 Every client header is forwarded untouched. So if you, your shell, or
 your user-level Claude settings already have a **real Anthropic API

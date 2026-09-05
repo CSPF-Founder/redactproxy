@@ -13,12 +13,12 @@ live engagement without that client's data reaching the model provider.
 
 ## Why
 
-Point an AI coding agent at a live engagement and everything ends up in
-the model: client domains, internal hostnames, credentials out of a
-config dump, employee emails, the client's own name. Almost none of it
-has any reason to leave your machine. The model doesn't need the real
-hostname to reason about a finding. It needs one that stays the same
-every time it sees it.
+When you run an AI coding agent on a live engagement, everything it
+touches ends up in the model: client domains, internal hostnames,
+credentials out of a config dump, employee emails, the client's own
+name. Almost none of it has any reason to leave your machine. The model
+doesn't need the real hostname to reason about a finding. It needs one
+that stays the same every time it sees it.
 
 That is all redactproxy does. It rewrites the API traffic and nothing
 else: no added prompts, no tool restrictions, no change to how Claude
@@ -62,15 +62,17 @@ context window is measured in.
 
 ## Documentation
 
-The full manual is in [`docs/`](docs/src/SUMMARY.md), and is published at
-<https://cspf-founder.github.io/redactproxy/>: install and first
-engagement, the rules and tokens commands, Claude Code configuration,
-the threat model and its known gaps, and reference pages for the CLI,
-every detector category, the placeholder shapes and `rules.json`.
+The full manual is in [`docs/`](docs/src/SUMMARY.md), published at
+<https://cspf-founder.github.io/redactproxy/>. The guides cover install
+and your first engagement, the `rules` and `tokens` commands, Claude
+Code configuration, and the threat model with its known gaps. The
+reference section documents the CLI, every detector category, the
+placeholder shapes, and `rules.json`.
 
-Start with [Your first engagement](docs/src/quickstart.md). Read
-[Known gaps](docs/src/security/gaps.md) before you point this at real
-client data.
+Start with
+[Your first engagement](https://cspf-founder.github.io/redactproxy/quickstart.html).
+Read [Known gaps](https://cspf-founder.github.io/redactproxy/security/gaps.html)
+before you point this at real client data.
 
 ## Quick start
 
@@ -103,12 +105,18 @@ cd /path/to/your/engagement-folder
 redactproxy wizard --engagement eng-2026-014
 ```
 
-The wizard asks which API provider to use, either real Claude or
-another provider speaking the same Messages API (z.ai, for example).
-Then it collects any client domains and names you always want redacted,
-and hardens this folder's `.claude/settings.local.json` against a few
-client-side channels that bypass the proxy entirely (see [What this
-doesn't protect](#what-this-doesnt-protect)).
+The wizard first collects the client names and domains you always want
+redacted, then asks which API this engagement talks to, either real
+Claude or another provider speaking the same Messages API (z.ai, for
+example). It finishes by offering two things for this folder: a
+`CLAUDE.md` note explaining the placeholder shapes, and a
+`.claude/settings.local.json` that points Claude Code at the proxy and
+closes a few client-side channels that bypass it entirely (see [What
+this doesn't protect](#what-this-doesnt-protect)).
+
+It also warns if the folder you run it in is named after the client.
+That path is embedded in every request in a part the proxy never scans,
+so no rule can redact it.
 
 Then, in the same folder:
 
@@ -162,11 +170,6 @@ different name overwrites the marker.
 
 None of this is sent anywhere. There is no telemetry, no sync, no
 backup.
-
-`tokens.db` is crash-consistent. A value committed to disk survives an
-abrupt kill, not just a clean shutdown. A request in flight when the
-process dies fails or times out like any other network interruption;
-nothing ends up corrupted or silently mismapped.
 
 ## Command reference
 
@@ -311,20 +314,10 @@ bodies. Known gaps:
   through `ANTHROPIC_BASE_URL` at all. The wizard's settings hardening
   closes what config can close.
 
-Found one that isn't on this list? Please report it: see
-[SECURITY.md](SECURITY.md).
-
-## Performance
-
-Scan results are cached by content hash, so you pay per distinct
-string, once. Conversation history gets resent every turn, so most of a
-typical request is cache hits.
-
-The exception is a body that mints hundreds of new values at once, a
-full-subnet `nmap` the first time you run it being the obvious one. Each
-value is its own committed write, which is what makes the store
-crash-safe and what turns milliseconds into seconds. Sending the same
-output again costs nothing.
+Found one that isn't on this list? Please open an
+[issue](https://github.com/CSPF-Founder/redactproxy/issues), describing
+the shape of the value rather than the value itself.
+[SECURITY.md](SECURITY.md) covers what to report privately instead.
 
 ## Building and testing
 
@@ -340,7 +333,8 @@ make dist    # cross-compiled binaries (linux/darwin/windows, amd64/arm64)
 ```
 
 Requires Go 1.26.6 or newer. See [CONTRIBUTING.md](CONTRIBUTING.md) to
-work on the code and [SECURITY.md](SECURITY.md) to report a leak.
+work on the code and [SECURITY.md](SECURITY.md) for where to report
+what.
 
 ## License
 

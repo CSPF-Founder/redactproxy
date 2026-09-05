@@ -6,10 +6,9 @@
 > share the file, and delete it when you are done. Treat it exactly like
 > the engagement data itself.
 
-This is not an oversight. A log that showed only placeholders would be
-useless for the thing it exists for: working out why a real value was or
-was not detected. The tradeoff is deliberate, so the safety has to come
-from handling.
+A log that showed only placeholders would be useless for the thing it
+exists for: working out why a real value was or was not detected. The
+safety has to come from handling instead.
 
 ## Levels
 
@@ -95,8 +94,8 @@ covers this too. See
 
 ## Reporting a leak with it
 
-If you are attaching log output to a report through
-[SECURITY.md](https://github.com/CSPF-Founder/redactproxy/blob/main/SECURITY.md),
-redact the client values by hand first, or reproduce against synthetic
-data shaped like the real thing. A leak report should not itself be a
-leak.
+If you are attaching log output to a report, redact the client values by
+hand first, or reproduce against synthetic data shaped like the real
+thing. Leak reports are public issues (see
+[SECURITY.md](https://github.com/CSPF-Founder/redactproxy/blob/main/SECURITY.md)),
+and a leak report should not itself be a leak.

@@ -5,8 +5,9 @@ collide with, a real value. Where the structure of a value carries
 context that is useful but not identifying, that structure is preserved.
 
 This is the same material `redactproxy memory` puts into an engagement's
-`CLAUDE.md`, in more detail. If you are wondering whether a
-strange-looking string in a session is a placeholder, this is the page.
+`CLAUDE.md`, in more detail and written for you rather than for Claude.
+If you are wondering whether a strange-looking string in a session is a
+placeholder, this is the page.
 
 ## Structure-preserving shapes
 
@@ -51,10 +52,15 @@ relationships between hosts without ever seeing whose they are.
   extensions.
 
 > [!IMPORTANT]
-> A placeholder IP is **not test data**. The range looks reserved
-> because it was chosen to be unmistakable, not because the address it
-> stands in for is any less real or less sensitive. Treat it exactly
-> like a genuine external target in your reasoning.
+> A placeholder IP is **not test data**. The range is reserved because
+> that is what makes it unmistakable, not because the address behind it
+> is any less real or less sensitive. A finding on `198.18.7.19` is a
+> finding on a real external target.
+>
+> The shape invites the opposite inference, which is why the
+> `redactproxy memory` note tells Claude explicitly not to discount or
+> deprioritize one. A report that reaches you with placeholders still in
+> it describes real targets, not lab hosts.
 
 ## Credential shapes
 
@@ -93,8 +99,8 @@ key is useful; knowing which one is not.
 | Connection string | `REDACTED-CREDS-` |
 | PEM private key | `-----BEGIN REDACTED PRIVATE KEY-----` |
 
-`FAKE` is the anchor, and it is not decorative: `K` is not a valid hex
-digit, so `FAKE` can never appear inside a real random-hex secret. AWS
+`FAKE` is the anchor: `K` is not a valid hex digit, so `FAKE` can never
+appear inside a real random-hex secret. AWS
 in particular never allocates `FAKE` as the four characters after
 `AKIA`, so the placeholder is structurally non-issuable rather than just
 visually distinct.
@@ -122,20 +128,22 @@ nothing in one to reverse, and no information about the value it stands
 for. This is also why `tokens remove` followed by re-encountering the
 value produces a *different* placeholder.
 
-**Never guess or reconstruct one.** Reproduce a placeholder exactly,
-copied from its most recent literal appearance. A token retyped from
-memory, fragmented into a bare subdomain plus suffix, or replaced with a
-hand-typed `<angle bracket>` stand-in silently breaks something
-downstream: an `Edit`'s `old_string` stops matching the real file, or a
-report line traces back to nothing.
+**Only safe copied verbatim.** A placeholder has to be reproduced
+character for character, from its most recent literal appearance. One
+retyped from memory, fragmented into a bare subdomain plus suffix, or
+swapped for a hand-typed `<angle bracket>` stand-in silently breaks
+something downstream: an `Edit`'s `old_string` stops matching the real
+file, or a report line traces back to nothing. The same applies to
+placeholders you copy by hand.
 
 **An unfamiliar placeholder is not a bug.** It is either a token doing
 its job, or an over-redaction of something merely domain-shaped
 (`table.style`, where `.style` is a real suffix). Either way the real
 value is substituted before execution, on every response rather than
-just the first, so the command runs correctly regardless. Verify against
-the real filesystem with `Bash` or `Read` rather than reasoning around
-the token.
+just the first, so the command runs correctly regardless. The real
+filesystem is ground truth here, since the proxy only ever inspects API
+traffic, which is why the memory note points Claude at `Bash` and `Read`
+rather than at reasoning around the token.
 
 ## Capacity limits
 

@@ -4,8 +4,11 @@ Detection is regex-based and only ever sees request and response bodies.
 These are the gaps that follow from that, written down so they are
 decisions you make rather than surprises you discover.
 
-If you find one that isn't here, please report it privately through
-[SECURITY.md](https://github.com/CSPF-Founder/redactproxy/blob/main/SECURITY.md).
+If you find one that isn't here, please open an
+[issue](https://github.com/CSPF-Founder/redactproxy/issues). See
+[SECURITY.md](https://github.com/CSPF-Founder/redactproxy/blob/main/SECURITY.md)
+for the smaller set of findings that go through private reporting
+instead.
 
 ## Your folder name
 
