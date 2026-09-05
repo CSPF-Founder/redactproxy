@@ -1,0 +1,115 @@
+name: Release
+
+# Publishes a binary for every platform `make dist` covers whenever a v*
+# tag is pushed.
+#
+#   git tag -a v0.1.0 -m "v0.1.0" && git push origin v0.1.0
+#
+# Run it manually from the Actions tab to build and check the artifacts
+# without publishing anything, which is worth doing before tagging.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # `make dist` stamps main.version from `git describe`, which
+          # needs the tag objects; the default shallow checkout has none.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+          check-latest: true
+
+      # Pure Go with no cgo, so every target cross-compiles from here and
+      # all five binaries come out of one toolchain rather than five
+      # runners that could drift apart.
+      #
+      # `dist` depends on `check` (vet + race), so a release cannot be cut
+      # from a tree whose tests don't pass.
+      - name: Build
+        run: make dist VERSION="${GITHUB_REF_NAME}"
+
+      # The linker stamp is the one thing here that a normal build never
+      # exercises, and getting it wrong yields binaries that cannot say
+      # what they are. Check it rather than trusting it.
+      - name: Smoke test the linux binary
+        run: |
+          set -euo pipefail
+          got="$(./dist/redactproxy-linux-amd64 version)"
+          echo "$got"
+          if [ "$got" != "redactproxy ${GITHUB_REF_NAME}" ]; then
+            echo "::error::expected 'redactproxy ${GITHUB_REF_NAME}', got '$got'"
+            exit 1
+          fi
+        if: startsWith(github.ref, 'refs/tags/v')
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          cd dist
+          for bin in redactproxy-*; do
+            case "$bin" in
+              *.tar.gz|*.zip) continue ;;
+            esac
+            platform="${bin#redactproxy-}"
+            platform="${platform%.exe}"
+            name="redactproxy-${version}-${platform}"
+            mkdir -p "$name"
+            # Named plainly inside the archive: the platform is already in
+            # the archive name, and what lands on someone's PATH should be
+            # "redactproxy", not "redactproxy-linux-amd64".
+            if [ "${bin##*.}" = "exe" ]; then
+              cp "$bin" "$name/redactproxy.exe"
+            else
+              cp "$bin" "$name/redactproxy"
+            fi
+            cp ../README.md ../LICENSE ../SECURITY.md "$name/"
+            if [ "${bin##*.}" = "exe" ]; then
+              zip -qr "$name.zip" "$name"
+            else
+              tar czf "$name.tar.gz" "$name"
+            fi
+            rm -rf "$name" "$bin"
+          done
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%P\n' \
+            | sort | xargs -r sha256sum > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-artifacts
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-artifacts
+          path: dist
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

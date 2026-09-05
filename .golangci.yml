@@ -1,0 +1,37 @@
+version: "2"
+
+linters:
+  # The "standard" set: errcheck, govet, ineffassign, staticcheck, unused.
+  # Deliberately not "all": most of what that turns on is style opinion
+  # rather than defect detection, and a lint config nobody trusts gets
+  # bypassed rather than fixed.
+  #
+  # v2 folded gosimple and stylecheck into staticcheck, so staticcheck here
+  # also carries the ST* and QF* checks those two used to contribute
+  # separately. That is a real widening over the v1 set, and the findings it
+  # produced were fixed rather than excluded.
+  default: standard
+
+  exclusions:
+    # golangci-lint v1 applied a set of default exclusion presets implicitly
+    # (issues.exclude-use-default defaulted to true). "std-error-handling" was
+    # among them, which waived errcheck on fmt.Fprint*, (*os.File).Close and
+    # os.Remove in production code as well as tests -- the opposite of what
+    # the exemption below says this project does. None of the presets are
+    # carried over: every site they used to hide is now either handled or
+    # explicitly discarded with `_ =` and a reason.
+    rules:
+      # A test HTTP handler writing a response body, or a t.Cleanup killing
+      # a subprocess, has nowhere useful to send an error: the test fails
+      # on the assertion that follows either way. Checking them adds noise
+      # without adding a signal.
+      - path: _test\.go
+        linters:
+          - errcheck
+
+issues:
+  # golangci-lint hides duplicates by default (3 per linter, 3 per text),
+  # which quietly turns a systemic problem into what looks like three
+  # isolated ones.
+  max-issues-per-linter: 0
+  max-same-issues: 0

@@ -1,0 +1,136 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Weekly, so a newly published Go advisory reaches the vulncheck job
+  # without waiting for someone to open a pull request.
+  schedule:
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  # Run the suite on both platforms that get a `make dist` binary and can
+  # host the tests. Windows is covered by the cross-build job below
+  # instead: it ships a binary, but shutdown_test.go drives a real
+  # SIGTERM at a subprocess, which Windows has no equivalent for.
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+          check-latest: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      # One platform is enough for a formatting check, and running it on
+      # Windows would only ever report line-ending noise.
+      - name: gofmt check
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          diff="$(gofmt -l .)"
+          if [ -n "$diff" ]; then
+            echo "The following files are not gofmt-formatted:"
+            echo "$diff"
+            exit 1
+          fi
+
+      - name: Test (race)
+        run: go test -race -count=1 ./...
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+          check-latest: true
+
+      # Pinned rather than "latest", and bumped together with
+      # .golangci.yml: golangci-lint embeds a Go type-checker at build
+      # time and refuses to run against a module targeting a newer Go
+      # than it was built with. A pin that stops tracking go.mod's `go`
+      # directive fails the job outright ("the Go language version used
+      # to build golangci-lint is lower than the targeted Go version"),
+      # which is how v1.64.8 (built with go1.24) died against go 1.26.
+      # When raising the go directive, check `golangci-lint --version`
+      # reports a build at least that new.
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.2
+
+      # go.mod and go.sum are inputs to every build here and to the
+      # release workflow's checksums, so an untidy pair is a
+      # reproducibility problem, not a cosmetic one. `git diff --exit-code`
+      # rather than reading tidy's output: tidy succeeds quietly whether
+      # or not it changed anything.
+      - name: go mod tidy is up to date
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+  # This proxy terminates TLS to the upstream and parses attacker-adjacent
+  # text all day, so a reachable CVE in net/http or crypto/tls is a
+  # finding about THIS tool, not distant trivia. Runs on a schedule as
+  # well as on pull requests because the code doesn't have to change for
+  # a new advisory to start applying to it.
+  vulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+          check-latest: true
+
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  # Every target `make dist` publishes has to at least compile on every
+  # pull request. Without this, a platform-specific break (a syscall
+  # constant that doesn't exist on Windows, say) stays invisible until
+  # release day, when it turns a tag into a broken artifact.
+  cross-build:
+    name: Cross-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+          check-latest: true
+
+      - name: Build every dist target
+        run: |
+          set -euo pipefail
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+            echo "==> $target"
+            GOOS="${target%/*}" GOARCH="${target#*/}" go build -o /dev/null ./...
+          done
+
+      # vet type-checks the test files too, so this catches a
+      # Windows-only compile break in code the test job never builds.
+      - name: Vet for Windows
+        run: GOOS=windows GOARCH=amd64 go vet ./...

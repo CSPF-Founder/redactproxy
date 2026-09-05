@@ -1,0 +1,2 @@
+go test fuzz v1
+string("hooks.slack.com/services/\xa8")

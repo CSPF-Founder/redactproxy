@@ -1,0 +1,32 @@
+[book]
+title = "RedactProxy Documentation"
+authors = ["Cyber Security & Privacy Foundation (CSPF)"]
+description = "User manual for redactproxy, a local two-way redaction proxy for Claude Code and the Anthropic Messages API"
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+smart-punctuation = true
+git-repository-url = "https://github.com/CSPF-Founder/redactproxy"
+edit-url-template = "https://github.com/CSPF-Founder/redactproxy/edit/main/docs/{path}"
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
+
+[output.html.search]
+limit-results = 20
+use-boolean-and = true
+boost-title = 2
+boost-hierarchy = 1
+boost-paragraph = 1
+
+[output.html.fold]
+enable = true
+level = 1
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"

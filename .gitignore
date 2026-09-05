@@ -1,0 +1,12 @@
+/bin/
+/dist/
+*.test
+*.out
+
+# mdbook build output
+docs/book/
+
+# Per-checkout local state -- never meant to be shared/committed, and
+# accidentally committing this could point a fresh checkout at the
+# wrong engagement (see the wizard's -engagement flag).
+.redactproxy-engagement

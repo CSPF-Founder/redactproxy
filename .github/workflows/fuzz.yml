@@ -1,0 +1,46 @@
+name: Fuzz
+
+# The committed seed corpora under internal/*/testdata/fuzz already run on
+# every `go test`, so this is only the open-ended mutation search on top:
+# too slow to sit on a pull request, and the place new crashers actually
+# come from. Nightly, plus a manual trigger for when someone wants to
+# hammer a target after changing a detector.
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: Time per target (Go duration, e.g. 300s)
+        default: 60s
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Fuzz
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+          check-latest: true
+
+      - name: Run every fuzz target
+        run: make fuzz FUZZTIME=${{ inputs.fuzztime || '60s' }}
+
+      # A failing target writes the input that broke it to
+      # testdata/fuzz/<FuzzName>/. That file is the whole value of the
+      # run: without uploading it the job just reports that something
+      # crashed and throws away the only thing that reproduces it.
+      # CONTRIBUTING.md asks for it to be committed alongside the fix.
+      - name: Upload crashers
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-crashers
+          path: internal/**/testdata/fuzz/**
+          if-no-files-found: ignore

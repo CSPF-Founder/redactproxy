@@ -1,0 +1,22 @@
+version: 2
+updates:
+  # The dependency surface here is four direct modules, so batching
+  # everything into one weekly pull request keeps the noise proportional
+  # to that. golang.org/x/net matters more than its version number
+  # suggests: it carries the Public Suffix List data the domain splitter
+  # validates against, so a stale pin means stale suffix rules.
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      go-dependencies:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]
