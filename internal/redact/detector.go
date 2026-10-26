@@ -393,6 +393,9 @@ func (d domainDetector) Detect(text string) ([]Detection, error) {
 			if !d.forceAsDomain[registrable] && looksLikeBareFilename(text, matchStart, end, parts) {
 				continue
 			}
+			if !d.forceAsDomain[registrable] && looksLikeMethodCall(text, matchStart, cand.ToOrig(len(cand.Clean)), parts.suffix) {
+				continue
+			}
 			out = append(out, Detection{
 				Start: matchStart, End: end,
 				Lookups:           []lookup{{Real: registrable, Type: tokenstore.EntityDomain}},
@@ -654,6 +657,46 @@ func looksLikeBareFilename(text string, start, end int, parts domainParts) bool 
 		}
 	}
 	return true
+}
+
+// looksLikeMethodCall reports whether the domain candidate spanning
+// [start, end), with public suffix suffix, is really a call expression
+// in code: immediately followed by "(" ("datetime.datetime.now()",
+// "subprocess.run([...])", "OpenVPNPacket.build({"). The new-gTLD
+// program made hundreds of ordinary words real TLDs (.now, .run,
+// .group, .build, .app, ...), so "obj.method(" is syntactically a
+// domain, and tokenizing it broke scripts the model wrote.
+//
+// The "(" alone is not enough: tools do print a real hostname right
+// before one ("Connecting to db01.example.com(10.0.0.5)"), and a client
+// domain on a word gTLD ("acme.app(beta)") looks exactly like
+// "obj.app(". So the TLD must also be one of methodNameTLDs, words that
+// are far more often a method than a company's domain. An explicit
+// "scheme://" or "www." still wins, and so does an operator's own
+// `rules block --domain` entry (checked by the caller). Attribute access
+// without a call ("config.live", "arr.group;") has no "(" and is still
+// tokenized; see TestKnownAmbiguity_CcTLDExtensionCollision.
+func looksLikeMethodCall(text string, start, end int, suffix string) bool {
+	if end >= len(text) || text[end] != '(' {
+		return false
+	}
+	if !methodNameTLDs[suffix] {
+		return false
+	}
+	candidate := strings.ToLower(text[start:end])
+	before := strings.ToLower(text[:start])
+	return !strings.HasPrefix(candidate, "www.") && !strings.HasSuffix(before, "://")
+}
+
+// methodNameTLDs are real TLDs that are also everyday method names in
+// Python/JS/Go ("datetime.now()", "date.today()", "subprocess.run()",
+// "m.group(1)", "el.click()", "model.fit()"). Deliberately short: words
+// a company plausibly registers its domain under (.app, .dev, .store,
+// .page, .link, .live, .email, ...) stay out, since missing one of those
+// would leak a client domain, while a stray token in code is recoverable.
+var methodNameTLDs = map[string]bool{
+	"now": true, "today": true, "run": true, "build": true, "group": true,
+	"show": true, "watch": true, "fit": true, "click": true, "help": true,
 }
 
 // --- IPv4 ----------------------------------------------------------------
