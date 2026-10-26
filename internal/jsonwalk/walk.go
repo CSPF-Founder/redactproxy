@@ -703,6 +703,15 @@ func collectBlockArrayPaths(blocks gjson.Result, basePath string, paths *[]strin
 						if p := shapeProblem(sub, "type", "tool_name", "cache_control"); p != "" && unknownType == "" {
 							unknownType = fmt.Sprintf("tool_reference (%s)", p)
 						}
+					case subType == "search_result":
+						srPaths, p := searchResultPaths(sub, fmt.Sprintf("%s.content.%d", blockBase, ti.Int()))
+						if p != "" {
+							if unknownType == "" {
+								unknownType = fmt.Sprintf("search_result (%s)", p)
+							}
+						} else {
+							*paths = append(*paths, srPaths...)
+						}
 					default:
 						if unknownType == "" {
 							unknownType = subType
@@ -815,6 +824,61 @@ func fallbackProblem(block gjson.Result) string {
 		}
 	}
 	return ""
+}
+
+// searchResultPaths returns the content-carrying string paths of a
+// search_result sub-block at base (its source, title, and each text
+// block in its content), or a description of why it doesn't have the
+// exact known shape (empty string if it does).
+//
+// Unlike the pass-through types above, a search_result carries real
+// content and is always scanned. Claude Code produces one inside a
+// tool_result both for its own web search (public results, already
+// fetched on Anthropic's side) and for a local MCP tool that returns
+// search results -- an internal wiki or ticket search, say, whose
+// source URLs, titles and snippets are exactly the client data this
+// proxy exists to keep off the wire. Nothing in the block tells the two
+// apart, so both are treated as the MCP case. The strict shape check is
+// what makes that complete: a field this function doesn't know to scan
+// fails closed instead of going out unscanned.
+func searchResultPaths(sr gjson.Result, base string) (paths []string, problem string) {
+	if p := shapeProblem(sr, "type", "source", "title", "content", "citations", "cache_control"); p != "" {
+		return nil, p
+	}
+	for _, field := range []string{"source", "title"} {
+		if sr.Get(field).Type != gjson.String {
+			return nil, fmt.Sprintf("%s not a string", field)
+		}
+		paths = append(paths, base+"."+field)
+	}
+	content := sr.Get("content")
+	if !content.IsArray() {
+		return nil, "content not an array"
+	}
+	content.ForEach(func(ci, block gjson.Result) bool {
+		if p := shapeProblem(block, "type", "text"); p != "" {
+			problem = "content block " + p
+			return false
+		}
+		if block.Get("type").String() != "text" || block.Get("text").Type != gjson.String {
+			problem = "content block not a text block"
+			return false
+		}
+		paths = append(paths, fmt.Sprintf("%s.content.%d.text", base, ci.Int()))
+		return true
+	})
+	if problem != "" {
+		return nil, problem
+	}
+	if c := sr.Get("citations"); c.Exists() {
+		if p := shapeProblem(c, "enabled"); p != "" {
+			return nil, "citations " + p
+		}
+		if e := c.Get("enabled"); e.Exists() && e.Type != gjson.True && e.Type != gjson.False {
+			return nil, "citations.enabled not a boolean"
+		}
+	}
+	return paths, ""
 }
 
 // collectLeafStrings recursively finds every string leaf inside an

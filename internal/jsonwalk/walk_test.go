@@ -551,6 +551,66 @@ func TestDetokenize_FallbackBlock_RestOfResponseDetokenized(t *testing.T) {
 	}
 }
 
+// TestTokenize_ToolResultSearchResult_Scanned: a local MCP search tool
+// (or Claude Code's web search with citations on) returns search_result
+// sub-blocks, which used to fail closed as unrecognized. Their source,
+// title and every text block must be scanned -- they're tool output like
+// any other -- while protocol fields stay untouched. Covers both
+// tool_result and mcp_tool_result, which share the sub-block routing.
+func TestTokenize_ToolResultSearchResult_Scanned(t *testing.T) {
+	for _, resultType := range []string{"tool_result", "mcp_tool_result"} {
+		t.Run(resultType, func(t *testing.T) {
+			in := []byte(`{"messages":[{"role":"user","content":[{"type":"` + resultType + `","tool_use_id":"toolu_1","content":[{"type":"search_result","source":"https://wiki.real-target.example/runbook","title":"real-target.example runbook","content":[{"type":"text","text":"db host is db01.real-target.example"},{"type":"text","text":"second snippet"}],"citations":{"enabled":true}}]}]}]}`)
+			out, err := Tokenize(in, markTransform)
+			if err != nil {
+				t.Fatalf("expected a search_result sub-block to be accepted, got: %v", err)
+			}
+			s := mustPretty(t, out)
+			for _, want := range []string{
+				`"source":"TOK:https://wiki.real-target.example/runbook"`,
+				`"title":"TOK:real-target.example runbook"`,
+				`"text":"TOK:db host is db01.real-target.example"`,
+				`"text":"TOK:second snippet"`,
+				`"citations":{"enabled":true}`,
+				`"tool_use_id":"toolu_1"`,
+			} {
+				if !strings.Contains(s, want) {
+					t.Fatalf("missing %s in: %s", want, s)
+				}
+			}
+		})
+	}
+}
+
+// TestTokenize_SearchResult_UnexpectedShape_FailsClosed: scanning a
+// search_result is complete only for the fields searchResultPaths knows,
+// so anything else must block rather than go out unscanned.
+func TestTokenize_SearchResult_UnexpectedShape_FailsClosed(t *testing.T) {
+	cases := map[string]string{
+		"extra field":                `{"type":"search_result","source":"s","title":"t","content":[],"snippet":"real-target.example"}`,
+		"source not a string":        `{"type":"search_result","source":{"url":"real-target.example"},"title":"t","content":[]}`,
+		"title missing":              `{"type":"search_result","source":"s","content":[]}`,
+		"content not an array":       `{"type":"search_result","source":"s","title":"t","content":"real-target.example"}`,
+		"non-text content block":     `{"type":"search_result","source":"s","title":"t","content":[{"type":"some_future_sub_block","data":"real-target.example"}]}`,
+		"extra field on text block":  `{"type":"search_result","source":"s","title":"t","content":[{"type":"text","text":"x","note":"real-target.example"}]}`,
+		"text not a string":          `{"type":"search_result","source":"s","title":"t","content":[{"type":"text","text":{"x":"real-target.example"}}]}`,
+		"extra field in citations":   `{"type":"search_result","source":"s","title":"t","content":[],"citations":{"enabled":true,"note":"real-target.example"}}`,
+		"citations.enabled a string": `{"type":"search_result","source":"s","title":"t","content":[],"citations":{"enabled":"real-target.example"}}`,
+	}
+	for name, block := range cases {
+		t.Run(name, func(t *testing.T) {
+			in := []byte(`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[` + block + `]}]}]}`)
+			out, err := Tokenize(in, markTransform)
+			if err == nil {
+				t.Fatalf("expected fail closed, got output: %s", out)
+			}
+			if !strings.Contains(err.Error(), "search_result") {
+				t.Fatalf("expected the error to name the block type, got: %v", err)
+			}
+		})
+	}
+}
+
 // TestDetokenize_UnrecognizedContentBlockType_StillFailsOpen confirms
 // Tokenize's new fail-closed behavior for an unrecognized block type
 // does NOT change Detokenize's own, deliberately different, fail-open
