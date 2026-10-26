@@ -1226,6 +1226,97 @@ func TestProxy_Streaming_CompactionBlockNeverModified(t *testing.T) {
 	}
 }
 
+// TestProxy_Streaming_BlockLeftOpenAtMessageEnd_HeldBackContentFlushed
+// is a regression test: a message can end with a block that never got
+// its content_block_stop -- a refusal cutting the response off mid-block,
+// an error event mid-stream, or the connection just closing -- and
+// whatever that block was still holding back used to be silently
+// dropped: the tail of a text block (here, a whole token at its end) or
+// a tool call's entire buffered input. Claude Code echoes such a partial
+// back when it continues on a fallback model, so the client must get
+// all of it, detokenized, and before the frame that ends the message.
+func TestProxy_Streaming_BlockLeftOpenAtMessageEnd_HeldBackContentFlushed(t *testing.T) {
+	refusal := sseFrame("message_delta", `{"type":"message_delta","delta":{"stop_reason":"refusal","stop_details":{"type":"refusal","category":"cyber","fallback_credit_token":"fct_1","fallback_has_prefill_claim":true}},"usage":{"output_tokens":5}}`) +
+		sseFrame("message_stop", `{"type":"message_stop"}`)
+	errorEvent := sseFrame("error", `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`)
+
+	for _, tc := range []struct {
+		name   string
+		block  string // "text" or "tool_use"
+		ending string // frames after the open block; "" = connection closes
+		marker string // the frame that ends the message, which must come after the flushed content
+	}{
+		{"text, refusal", "text", refusal, `"message_delta"`},
+		{"text, error event", "text", errorEvent, `"overloaded_error"`},
+		{"text, connection closes", "text", "", ""},
+		{"tool_use, refusal", "tool_use", refusal, `"message_delta"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			store, err := tokenstore.Open(filepath.Join(dir, "tokens.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			token, err := store.GetOrCreateToken("widgetcorp-fixture.com", tokenstore.EntityDomain)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var frames []string
+			if tc.block == "text" {
+				// The token ends the text, so it's held back until the
+				// block closes -- which it never does.
+				frames = []string{
+					sseFrame("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
+					sseFrame("content_block_delta", fmt.Sprintf(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":%q}}`, "Host is "+token[:6])),
+					sseFrame("content_block_delta", fmt.Sprintf(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":%q}}`, token[6:])),
+				}
+			} else {
+				frames = []string{
+					sseFrame("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}}`),
+					sseFrame("content_block_delta", fmt.Sprintf(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":%q}}`, `{"command":"curl `+token+`"}`)),
+				}
+			}
+			if tc.ending != "" {
+				frames = append(frames, tc.ending)
+			}
+			upstream := sseUpstream(t, frames)
+			defer upstream.Close()
+
+			engine := redact.New(store, redact.DefaultDetectors()...)
+			upstreamURL, _ := url.Parse(upstream.URL)
+			ts := httptest.NewServer(New(Config{Upstream: upstreamURL, Engine: engine}))
+			defer ts.Close()
+
+			resp, err := http.Post(ts.URL+"/v1/messages", "application/json", strings.NewReader(`{"stream":true,"messages":[]}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			raw, _ := io.ReadAll(resp.Body)
+
+			texts, inputJSONs := readAllSSEDeltaText(t, bytes.NewReader(raw))
+			if tc.block == "text" {
+				if got, want := strings.Join(texts, ""), "Host is widgetcorp-fixture.com"; got != want {
+					t.Fatalf("client text = %q, want %q (full stream: %s)", got, want, raw)
+				}
+			} else {
+				if got, want := strings.Join(inputJSONs, ""), `{"command":"curl widgetcorp-fixture.com"}`; got != want {
+					t.Fatalf("client tool input = %q, want %q (full stream: %s)", got, want, raw)
+				}
+			}
+			if tc.marker != "" {
+				flushed := strings.Index(string(raw), "widgetcorp-fixture.com")
+				end := strings.Index(string(raw), tc.marker)
+				if end < 0 || flushed > end {
+					t.Fatalf("held-back content must reach the client before %s (content at %d, marker at %d): %s", tc.marker, flushed, end, raw)
+				}
+			}
+		})
+	}
+}
+
 // TestServer_StreamingReleasesSemaphoreBeforeStreamEnds confirms the
 // concurrency semaphore only bounds body-buffering, not the full SSE
 // streaming duration: with MaxConcurrent set well below the number of
