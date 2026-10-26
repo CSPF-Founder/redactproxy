@@ -105,11 +105,33 @@ in a folder the wizard configured, re-run the wizard with the matching
 `--listen` so the settings file agrees, or the folder's Claude Code will
 keep pointing at the old port.
 
-`--listen` must be a loopback address. `127.0.0.1`, `::1` and
-`localhost` are accepted; anything else, including the bare `:8787`
-shorthand that binds every interface, is refused at startup. This proxy
-handles real client data in transit and must never be reachable from the
-network.
+`--listen` must be a loopback address unless you opt out. `127.0.0.1`,
+`::1` and `localhost` are accepted; anything else, including the bare
+`:8787` shorthand that binds every interface, is refused at startup.
+
+### Running Claude Code on another machine
+
+When Claude Code runs somewhere else (a VM, a container, a jump box),
+bind the proxy to an address that machine can reach and add
+`--allow-non-loopback`:
+
+```bash
+redactproxy --listen 10.0.5.20:8787 --allow-non-loopback
+```
+
+Then point that machine's Claude Code at it with
+`ANTHROPIC_BASE_URL=http://10.0.5.20:8787`.
+
+The proxy warns at startup, and means it. It has no authentication, and
+every response it returns is detokenized, so anyone who can reach the
+port and has any API key of their own can ask the model to repeat
+placeholder values and read the real ones back. Treat the port like the
+token store itself:
+
+- bind a specific interface rather than `0.0.0.0` where you can,
+- firewall the port so only the machine running Claude Code can reach it,
+- never use it on a shared or untrusted network,
+- stop the proxy as soon as the session is over.
 
 ## Retiring an engagement
 

@@ -401,6 +401,41 @@ func TestMissingSecuritySettings(t *testing.T) {
 	}
 }
 
+// TestCheckListenAddr pins the --allow-non-loopback gate: loopback is
+// always allowed and never reported as exposed; anything else is refused
+// without the flag (with an error that names it) and allowed, but
+// reported as exposed so the caller warns, with it.
+func TestCheckListenAddr(t *testing.T) {
+	cases := []struct {
+		addr                 string
+		allow                bool
+		wantExposed, wantErr bool
+	}{
+		{"127.0.0.1:8787", false, false, false},
+		{"localhost:8787", true, false, false}, // flag given but not needed: no warning
+		{"[::1]:8787", false, false, false},
+		{"0.0.0.0:8787", false, false, true},
+		{"0.0.0.0:8787", true, true, false},
+		{":8787", false, false, true},
+		{":8787", true, true, false},
+		{"192.168.1.5:8787", false, false, true},
+		{"192.168.1.5:8787", true, true, false},
+		{"[::]:8787", true, true, false},
+	}
+	for _, tc := range cases {
+		exposed, err := checkListenAddr(tc.addr, tc.allow)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("checkListenAddr(%q, %v) err = %v, wantErr %v", tc.addr, tc.allow, err, tc.wantErr)
+		}
+		if err != nil && !strings.Contains(err.Error(), "--allow-non-loopback") {
+			t.Errorf("checkListenAddr(%q) refusal must name the flag that overrides it, got: %v", tc.addr, err)
+		}
+		if exposed != tc.wantExposed {
+			t.Errorf("checkListenAddr(%q, %v) exposed = %v, want %v", tc.addr, tc.allow, exposed, tc.wantExposed)
+		}
+	}
+}
+
 func TestIsLoopback(t *testing.T) {
 	cases := []struct {
 		addr string

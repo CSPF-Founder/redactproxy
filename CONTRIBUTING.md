@@ -4,9 +4,9 @@ Thanks for taking a look. New detectors, false-positive reports, and
 blind spots nobody has written down yet are all welcome.
 
 Suspected redaction leaks belong in the issue tracker like any other
-bug. The proxy is loopback-only and the value went to the provider you
-were already talking to, so there is nothing to embargo and a public
-report is the one other people can find. [SECURITY.md](SECURITY.md)
+bug. The proxy is loopback-only by default and the value went to the
+provider you were already talking to, so there is nothing to embargo and
+a public report is the one other people can find. [SECURITY.md](SECURITY.md)
 covers the narrower set of things to report privately instead.
 
 ## Getting set up

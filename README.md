@@ -22,8 +22,9 @@ that stays the same every time it sees it.
 
 That is all redactproxy does. It rewrites the API traffic and nothing
 else: no added prompts, no tool restrictions, no change to how Claude
-Code behaves. It listens on loopback and refuses to start on any other
-address.
+Code behaves. It listens on loopback only, and refuses any other address
+unless you explicitly pass `--allow-non-loopback` (see [Listening beyond
+loopback](#listening-beyond-loopback)).
 
 ## How it works
 
@@ -287,6 +288,25 @@ To run several engagements at once, start one `redactproxy` per
 engagement on its own `--listen` address and point each Claude Code
 session at the matching port. One process serves exactly one
 engagement.
+
+## Listening beyond loopback
+
+By default `--listen` must be a loopback address (`127.0.0.1`, `::1`,
+`localhost`), and anything else, including the bare `:8787` shorthand
+that binds every interface, is refused. If Claude Code genuinely runs on
+a different machine (a VM, a container, a jump box), add
+`--allow-non-loopback`:
+
+```bash
+redactproxy --listen 10.0.5.20:8787 --allow-non-loopback
+```
+
+Read the warning it prints before you rely on this. The proxy has **no
+authentication**, and it detokenizes every response, so anyone who can
+reach the port and has an API key of their own can send requests through
+it and get this engagement's real values back. Use it only on a network
+you fully control, firewall the port to the one machine that needs it,
+and stop the proxy when you are done.
 
 ## What this doesn't protect
 

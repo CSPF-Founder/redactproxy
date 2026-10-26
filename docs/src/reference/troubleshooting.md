@@ -64,9 +64,14 @@ See [Tokens and the live console](../tokens.md#the-live-console).
 
 ## `--listen is not a loopback address; refusing to bind`
 
-Only `127.0.0.1`, `::1` and `localhost` are accepted. The bare `:8787`
-shorthand is refused on purpose: it genuinely binds every interface, and
-this proxy handles real client data in transit.
+By default only `127.0.0.1`, `::1` and `localhost` are accepted. The bare
+`:8787` shorthand is refused on purpose: it genuinely binds every
+interface, and this proxy handles real client data with no
+authentication in front of it.
+
+If Claude Code really does run on another machine, add
+`--allow-non-loopback` and read the warning it prints first; see
+[Running Claude Code on another machine](../engagements.md#running-claude-code-on-another-machine).
 
 ## Claude Code isn't going through the proxy
 

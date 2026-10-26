@@ -7,7 +7,8 @@ wasn't, belong in the public [issue
 tracker](https://github.com/CSPF-Founder/redactproxy/issues).
 
 redactproxy binds to loopback on your own machine and refuses to bind
-anywhere else. A redaction miss means client data
+anywhere else unless the operator explicitly passes
+`--allow-non-loopback`. A redaction miss means client data
 reached the model provider you were already sending traffic to, not an
 unrelated third party. That is worth fixing, and under an NDA it is
 usually an obligation rather than a preference, but it is not a hole
@@ -21,8 +22,12 @@ get closed faster in the open.
 - **Code execution or memory unsafety** reachable from a request body or
   an upstream response. The proxy parses JSON and SSE it did not write.
 - **Anything that escapes loopback or the engagement directory.** A way
-  around the `--listen` loopback check, a path traversal in a rules or
-  store path, files created with permissions wider than `0600`.
+  around the `--listen` loopback check without `--allow-non-loopback`, a
+  path traversal in a rules or store path, files created with
+  permissions wider than `0600`. (Running with `--allow-non-loopback`
+  makes the proxy reachable by design, without authentication; exposure
+  that follows from using that flag is documented behavior, not a
+  vulnerability.)
 - **A way for another local process to read real values without reading
   the store file.** Anything on the machine can send requests through
   the proxy, and the inbound path detokenizes. It should not be usable
