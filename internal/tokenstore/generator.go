@@ -163,6 +163,10 @@ const (
 	// real decryptable cpassword value if it somehow ended up somewhere
 	// this tool doesn't control.
 	TokenGPPCPasswordPrefix = "FAKE-CPASSWORD-"
+	// TokenPasswordPrefix begins every generated fake plaintext password.
+	// Same "FAKE-" anchor as the cpassword token, so it reads as a
+	// placeholder at a glance and can't collide with a random secret.
+	TokenPasswordPrefix = "FAKE-PASSWORD-"
 )
 
 var counterKeyIPNetwork = []byte("ip_network")
@@ -276,6 +280,7 @@ var randomTokenShapes = map[EntityType]func() string{
 	EntityCustomBlock:       func() string { return TokenCustomBlockPrefix + randomHex(16) },
 	EntityADMachineAccount:  func() string { return TokenADMachineAccountPrefix + randomHex(6) + "$" },
 	EntityGPPCPassword:      func() string { return TokenGPPCPasswordPrefix + randomHex(24) },
+	EntityPassword:          func() string { return TokenPasswordPrefix + randomHex(12) },
 }
 
 // AllEntityTypes returns every entity type this package can mint a token

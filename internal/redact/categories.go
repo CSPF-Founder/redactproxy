@@ -42,6 +42,7 @@ func DefaultCategorizedDetectors() []CategorizedDetector {
 		{pemKeyDetector{}, "secrets", "pem_key", "PEM-armored private key blocks."},
 		{connStringDetector{}, "secrets", "connection_string", "Database/service connection strings with embedded credentials."},
 		{itsdangerousDetector{}, "secrets", "itsdangerous_token", "Flask itsdangerous-signed tokens (session/CSRF tokens)."},
+		{passwordDetector{}, "secrets", "password", "Plaintext passwords labeled by a password-like key (DB_PASSWORD=..., \"password\": \"...\", password: ...)."},
 		{hashDetector{}, "secrets", "password_hash", "Password hashes (MD5/NTLM/SHA-1/SHA-256), only when labeled by a nearby keyword, or in an Impacket secretsdump-style LM:NT pair."},
 		{adMachineAccountDetector, "windows_ad", "machine_account", "$-suffixed Active Directory machine/computer account names (e.g. \"WORKSTATION01$\") in a secretsdump.py/pwdump line."},
 		{gppCPasswordDetector, "windows_ad", "gpp_cpassword", "Group Policy Preferences \"cpassword\" values, trivially decryptable via Microsoft's published MS14-025 AES key."},

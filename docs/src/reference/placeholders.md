@@ -114,6 +114,7 @@ visually distinct.
 | Aadhaar | `0000 <4 digits> <4 digits>` | UIDAI never issues a number starting with 0 or 1 |
 | PAN | `FAKEP<4 digits><letter>` | `E` is not a valid holder-type code in position 4 |
 | AD machine account | `FAKEHOST<hex>$` | keeps the `$` suffix that makes it recognizable |
+| Labeled password | `FAKE-PASSWORD-<hex>` | `K` is not a hex digit, and it reads as a placeholder at a glance |
 | GPP cpassword | `FAKE-CPASSWORD-<hex>` | contains `-`, which is not in the base64 alphabet, so it can never decrypt |
 | Custom block entry | `tok-blocked-<hex>` | opaque by design |
 | itsdangerous token | `tok-signed-<hex>` | opaque by design |

@@ -24,6 +24,7 @@ import (
 	"net/netip"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/CSPF-Founder/redactproxy/internal/tokenstore"
 )
@@ -1292,6 +1293,129 @@ var gppCPasswordRe = regexp.MustCompile(`(?i)\bcpassword\s*=\s*"([A-Za-z0-9+/]{1
 
 var gppCPasswordDetector = capturedMatchDetector{gppCPasswordRe, tokenstore.EntityGPPCPassword, tokenstore.TokenGPPCPasswordPrefix}
 
+// --- Labeled plaintext password -------------------------------------------
+
+// passwordKeyRe matches a password-like key and the separator after it,
+// ending exactly where the value starts: password / passwd / passphrase /
+// pwd as a whole word, optionally with a prefix ("DB_PASSWORD",
+// camelCase "dbPassword"), optionally quoted (JSON, YAML), then ":", "="
+// or "=>". "pass" counts only with a prefix ("DB_PASS", "dbPass"): on its
+// own it is an ordinary English word ("first pass: ...").
+//
+// Requiring the separator right after the key is what keeps prose out:
+// "the password is weak", "[sudo] password for kali:", and keys that
+// merely contain the word ("password_hash:", "min_password_length =")
+// never match. A real password has no shape of its own, so the label is
+// the only signal there is; this is the same keyword-anchoring as
+// bareCredentialKeywordRe, minus that detector's 20+ char / digit value
+// rule, which a human-chosen password ("Example@123") would never meet.
+var passwordKeyRe = regexp.MustCompile(`(?:^|[^A-Za-z0-9])(?:(?:[A-Za-z0-9]+[_-])*(?i:password|passwd|passphrase|pwd)|(?:[A-Za-z0-9]+[_-])+(?i:pass)|[a-z0-9]+(?:Password|Passwd|Passphrase|Pwd|Pass))["']?[ \t]*(?:=>|[:=])[ \t]*`)
+
+// passwordNonValues are values that sit next to a password key without
+// being a password: schema/type names (an OpenAPI example's
+// "password": "string"), nulls and flags, and redaction markers.
+var passwordNonValues = map[string]bool{
+	"string": true, "str": true, "text": true, "password": true, "passwd": true, "pwd": true,
+	"secret": true, "null": true, "nil": true, "none": true, "undefined": true,
+	"true": true, "false": true, "required": true, "optional": true, "hidden": true,
+	"redacted": true, "masked": true, "empty": true,
+}
+
+// passwordCodeIdentRe is an unquoted value that is a code reference, not
+// a literal: an identifier or dotted path with no digits ("None",
+// "password", "args.password", "settings.DB_PASSWORD"). A real password
+// written unquoted next to the key in code or config essentially always
+// has a digit or a symbol in it; one that is plain letters is the known,
+// accepted miss here, since in code it is far more often a variable.
+var passwordCodeIdentRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z_]*(?:\.[A-Za-z_][A-Za-z_]*)*$`)
+
+type passwordDetector struct{}
+
+func (passwordDetector) Detect(text string) ([]Detection, error) {
+	var out []Detection
+	for _, m := range passwordKeyRe.FindAllStringIndex(text, -1) {
+		start, end, ok := passwordValueSpan(text, m[1])
+		if !ok {
+			continue
+		}
+		out = append(out, simpleDetection(start, end, text[start:end], tokenstore.EntityPassword))
+	}
+	return out, nil
+}
+
+// passwordValueSpan returns the value that starts at pos (right after a
+// passwordKeyRe match), or ok=false when what's there isn't a literal
+// password (see passwordNonValues, passwordCodeIdentRe and the
+// placeholder checks below).
+func passwordValueSpan(text string, pos int) (start, end int, ok bool) {
+	if pos >= len(text) {
+		return 0, 0, false
+	}
+	quoted := false
+	switch q := text[pos]; q {
+	case '"', '\'', '`':
+		// Quoted: the value is everything up to the matching quote on
+		// the same line, so spaces and separators inside are kept.
+		quoted = true
+		start = pos + 1
+		end = start
+		for end < len(text) && text[end] != q && text[end] != '\n' {
+			if text[end] == '\\' && end+1 < len(text) {
+				end++
+			}
+			end++
+		}
+		if end >= len(text) || text[end] != q {
+			return 0, 0, false // unterminated: not a literal we can trust
+		}
+	default:
+		// Unquoted: up to whitespace or a character that ends a value in
+		// config, URL query and command-line syntax.
+		start = pos
+		end = start
+		for end < len(text) && !strings.ContainsRune(" \t\r\n\"'`,;&)}]<>", rune(text[end])) {
+			end++
+		}
+	}
+	val := text[start:end]
+	n := utf8.RuneCountInString(val)
+	if n < 4 || n > 200 {
+		return 0, 0, false
+	}
+	if strings.HasPrefix(val, tokenstore.TokenPasswordPrefix) || passwordNonValues[strings.ToLower(val)] {
+		return 0, 0, false
+	}
+	if isPasswordPlaceholder(val) {
+		return 0, 0, false
+	}
+	if !quoted && (passwordCodeIdentRe.MatchString(val) || strings.ContainsAny(val, "([{")) {
+		return 0, 0, false // a variable, call or index expression, not a literal
+	}
+	return start, end, true
+}
+
+// isPasswordPlaceholder reports a value that stands in for a password
+// rather than being one: a mask ("********", "xxxx"), a template or
+// variable reference ("${DB_PASS}", "{{ vault_pw }}", "$PASS",
+// "%PASS%", "%(pw)s", "<password>"), or a filesystem path, which is what
+// "PWD=" holds in any environment dump.
+func isPasswordPlaceholder(val string) bool {
+	if strings.Trim(val, val[:1]) == "" {
+		return true // one repeated character
+	}
+	switch {
+	case strings.Contains(val, "${"), strings.Contains(val, "{{"), strings.Contains(val, "%("),
+		strings.Contains(val, "$("),
+		strings.HasPrefix(val, "$"),
+		strings.HasPrefix(val, "%") && strings.HasSuffix(val, "%"),
+		strings.HasPrefix(val, "<") && strings.HasSuffix(val, ">"),
+		strings.HasPrefix(val, "/"), strings.HasPrefix(val, "~/"),
+		strings.HasPrefix(val, "./"), strings.HasPrefix(val, "../"):
+		return true
+	}
+	return false
+}
+
 // --- PEM private key block --------------------------------------------
 
 // Matches the whole armored block, any key type (RSA/EC/DSA/OPENSSH/
@@ -1563,15 +1687,14 @@ var sendGridKeyDetector = wholeMatchDetector{sendGridKeyRe, tokenstore.EntitySen
 //  2. ADO.NET/ODBC-style: semicolon-separated "Key=Value;..." pairs, e.g.
 //     "Server=10.0.0.5;Database=erp;User Id=sa;Password=...;", common in
 //     .NET/Windows environments. There's no fixed scheme prefix to anchor
-//     on here, only a "Password="/"Pwd=" keyword, which is exactly the
-//     shape of "context-anchored generic secret" detection that was
-//     deliberately deferred elsewhere in this package as too broad/
-//     high-false-positive on its own. The gate here is narrower than that
-//     general case: a bare "password=" is only treated as a real
-//     connection-string credential if a server/host-identifying key
-//     (Server=/Data Source=/Uid=/User Id=) also appears nearby in the
-//     same string, i.e. this only fires on the specific DB-connection-
-//     string shape, not on any "password=" mention anywhere in text.
+//     on here, only a "Password="/"Pwd=" keyword. A bare "password=" is
+//     only treated as a connection-string credential if a server/host-
+//     identifying key (Server=/Data Source=/Uid=/User Id=) also appears
+//     nearby in the same string, i.e. this only fires on the specific
+//     DB-connection-string shape. Any other labeled password is
+//     passwordDetector's (secrets.password); where both match the same
+//     value, this detector wins the tie (it is registered first; see
+//     resolveOverlaps), keeping the connection-string placeholder.
 var connStringURLRe = regexp.MustCompile(`\b((?:jdbc:)?(?:mongodb(?:\+srv)?|postgres(?:ql)?|mysql|rediss?|amqps?|ldaps?|ftp|sqlserver|https?)://)([^\s:@/'"]{1,64}:[^\s@'"]{1,128}@[^\s/'"]+)`)
 
 var adoPasswordRe = regexp.MustCompile(`(?i)\b(?:password|pwd)\s*=\s*([^;'"\s]{1,128})`)

@@ -164,6 +164,11 @@ const (
 	// published key. Fully opaque, same as any other secret-shaped
 	// entity.
 	EntityGPPCPassword EntityType = "gpp_cpassword"
+	// EntityPassword tokens identify a plaintext password labeled by a
+	// password-like key in config, JSON, env or tool output
+	// (DB_PASSWORD=..., "password": "...", login: x password: y). Fully
+	// opaque: a password has no structure worth preserving.
+	EntityPassword EntityType = "password"
 )
 
 var (

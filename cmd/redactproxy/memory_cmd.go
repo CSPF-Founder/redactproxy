@@ -41,7 +41,7 @@ Placeholder shapes you'll see (never real data, safe to use verbatim):
 - IPv6: ` + "`" + tokenstore.TokenIPv6NetworkPrefix + "...`" + `
 - Emails: ` + "`" + tokenstore.TokenEmailLocalPrefix + "<hex>@<domain token>`" + `
 - Credentials/API keys: opaque, vendor-prefixed (` + "`" + tokenstore.TokenAWSKeyPrefix + "...`, `" + tokenstore.TokenAWSSecretKeyPrefix + "...`, `" + tokenstore.TokenGitHubPrefix + "...`, `" + tokenstore.TokenBearerPrefix + "...`" + `, etc.)
-- Other secrets (password/NTLM hashes, values you told this tool to always redact, signed session/CSRF tokens, AD/GPP artifacts): opaque, distinctly-prefixed (` + "`" + tokenstore.TokenPasswordHashPrefix + "...`, `" + tokenstore.TokenCustomBlockPrefix + "...`, `" + tokenstore.TokenItsdangerousPrefix + "...`, `" + tokenstore.TokenADMachineAccountPrefix + "...$`" + `, etc.)
+- Other secrets (passwords, password/NTLM hashes, values you told this tool to always redact, signed session/CSRF tokens, AD/GPP artifacts): opaque, distinctly-prefixed (` + "`" + tokenstore.TokenPasswordPrefix + "...`, `" + tokenstore.TokenPasswordHashPrefix + "...`, `" + tokenstore.TokenCustomBlockPrefix + "...`, `" + tokenstore.TokenItsdangerousPrefix + "...`, `" + tokenstore.TokenADMachineAccountPrefix + "...$`" + `, etc.)
 
 The same real value always maps to the same placeholder, so treat these
 as stable identifiers, not garbage. Never guess, "correct," or reconstruct

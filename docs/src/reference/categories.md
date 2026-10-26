@@ -1,6 +1,6 @@
 # Detector categories
 
-There are 44 detector categories. Each can be enabled or disabled per
+There are 45 detector categories. Each can be enabled or disabled per
 engagement:
 
 ```bash
@@ -116,6 +116,7 @@ the same source. This page is that list, grouped.
 | `secrets.connection_string` | Database/service connection strings with embedded credentials. |
 | `secrets.itsdangerous_token` | Flask itsdangerous-signed tokens (session/CSRF tokens). |
 | `secrets.jwt` | JSON Web Tokens (JWTs). |
+| `secrets.password` | Plaintext passwords labeled by a password-like key (DB_PASSWORD=..., "password": "...", password: ...). |
 | `secrets.password_hash` | Password hashes (MD5/NTLM/SHA-1/SHA-256), only when labeled by a nearby keyword, or in an Impacket secretsdump-style LM:NT pair. |
 | `secrets.pem_key` | PEM-armored private key blocks. |
 

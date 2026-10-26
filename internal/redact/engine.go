@@ -666,6 +666,7 @@ var tokenPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\b` + regexp.QuoteMeta(tokenstore.TokenPasswordHashPrefix) + `[0-9a-f]{48}`),
 	regexp.MustCompile(`\b` + regexp.QuoteMeta(tokenstore.TokenADMachineAccountPrefix) + `[0-9a-f]{12}\$`),
 	regexp.MustCompile(regexp.QuoteMeta(tokenstore.TokenGPPCPasswordPrefix) + `[0-9a-f]{48}`),
+	regexp.MustCompile(regexp.QuoteMeta(tokenstore.TokenPasswordPrefix) + `[0-9a-f]{24}`),
 }
 
 // wrapDetokenizeBoundary rewrites one tokenPatterns entry's source into

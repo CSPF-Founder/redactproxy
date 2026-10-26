@@ -154,6 +154,60 @@ func TestBearerToken_KeywordInsideLongerWordLeftAlone(t *testing.T) {
 	}
 }
 
+// TestPassword_LabeledValueRedacted covers secrets.password: a
+// human-chosen password next to a password-like key, in the shapes a
+// pentest actually turns up (env/config dumps, JSON, YAML, tool output),
+// where no other detector fires because the value has no shape of its
+// own. Only the value is replaced; the key, separator and quotes stay,
+// so the model still sees well-formed config/JSON.
+func TestPassword_LabeledValueRedacted(t *testing.T) {
+	cases := []struct{ in, secret, keep string }{
+		{`password: "Example@123"`, "Example@123", `password: "`},
+		{`STRAPI_ADMIN_PASSWORD=Strapi#Adm1n@123`, "Strapi#Adm1n@123", `STRAPI_ADMIN_PASSWORD=`},
+		{`{"username":"svc_sms","password":"Gw8!smsPass2024"}`, "Gw8!smsPass2024", `{"username":"svc_sms","password":"`},
+		{"db:\n  user: app\n  pass_word: unused\n  password: 'S3cr3t pass phrase'\n", "S3cr3t pass phrase", "  password: '"},
+		{`[22][ssh] host: 10.0.0.5   login: admin   password: admin123`, "admin123", `password: `},
+		{`export DB_PASS=hunter2!`, "hunter2!", `export DB_PASS=`},
+		{`const dbPassword = "Winter2026!";`, "Winter2026!", `const dbPassword = "`},
+		{`'passwd' => 'pa55w0rd',`, "pa55w0rd", `'passwd' => '`},
+		{`https://app.example/login?user=admin&db_pass=Qwerty123&next=/`, "Qwerty123", `&db_pass=`},
+	}
+	for _, tc := range cases {
+		e := newTypesEngine(t)
+		out, err := e.Tokenize(tc.in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(out, tc.secret) {
+			t.Fatalf("password leaked: %q -> %q", tc.in, out)
+		}
+		if !strings.Contains(out, tc.keep+tokenstore.TokenPasswordPrefix) {
+			t.Fatalf("expected %q followed by the password placeholder, got %q", tc.keep, out)
+		}
+		if back := e.Detokenize(out); back != tc.in {
+			t.Fatalf("round-trip mismatch:\n  in:   %q\n  out:  %q\n  back: %q", tc.in, out, back)
+		}
+	}
+}
+
+// TestPassword_SameValueSameToken: like every other entity, a password
+// maps to one stable placeholder for the engagement, wherever it shows up.
+func TestPassword_SameValueSameToken(t *testing.T) {
+	e := newTypesEngine(t)
+	a, err := e.Tokenize(`DB_PASSWORD=Example@123`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := e.Tokenize(`{"password": "Example@123"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokA := a[strings.Index(a, tokenstore.TokenPasswordPrefix):]
+	if !strings.Contains(b, tokA) {
+		t.Fatalf("same password got different placeholders: %q vs %q", a, b)
+	}
+}
+
 // TestBearerToken_BareHighEntropyValueNoKeywordLeftAlone is the false-
 // positive guard for the fix above: a bare 20+ char token-shaped string
 // with no credential-labeling keyword anywhere nearby (a git SHA, a
@@ -926,16 +980,19 @@ func TestConnString_ADOStyleRoundTripAndContextGate(t *testing.T) {
 	}
 
 	// The narrower gate: a bare "password=" with no nearby Server=/Data
-	// Source=/Uid= context must NOT be treated as a connection string;
-	// this is deliberately NOT the general "context-anchored generic
-	// secret" detector that was declined elsewhere.
+	// Source=/Uid= context must NOT be treated as a connection string.
+	// It is still a password, though, and secrets.password claims it with
+	// its own placeholder (see passwordKeyRe).
 	proseIn := "the wiki says the default password=admin123 for the demo box"
 	proseOut, err := e.Tokenize(proseIn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if proseOut != proseIn {
-		t.Fatalf("a bare 'password=' with no connection-string context should pass through untouched, got %q", proseOut)
+	if strings.Contains(proseOut, tokenstore.TokenConnStringMarker) {
+		t.Fatalf("a bare 'password=' with no connection-string context must not be treated as a connection string, got %q", proseOut)
+	}
+	if want := "the wiki says the default password=" + tokenstore.TokenPasswordPrefix; !strings.HasPrefix(proseOut, want) {
+		t.Fatalf("expected the bare password redacted as a password, got %q", proseOut)
 	}
 }
 
