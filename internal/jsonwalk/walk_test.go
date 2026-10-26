@@ -432,6 +432,63 @@ func TestTokenize_TopLevelToolReference_FailsClosed(t *testing.T) {
 	}
 }
 
+// TestTokenize_MidConversationToolChanges_PassThrough covers the role
+// "system" message Claude Code sends when an MCP server connects or
+// disconnects mid-session: tool_removal / tool_addition blocks naming a
+// tool by reference or (additions only) by full definition. Like
+// tool_reference above, these used to fail closed as unrecognized and
+// block the rest of the session. They must pass through byte-for-byte,
+// definition included (the same data tools[] carries, never walked),
+// while a text block in the same message is still scanned.
+func TestTokenize_MidConversationToolChanges_PassThrough(t *testing.T) {
+	removal := `{"type":"tool_removal","tool":{"type":"tool_reference","name":"mcp__old__query"}}`
+	byRef := `{"type":"tool_addition","tool":{"type":"tool_reference","name":"mcp__internal-db__query"}}`
+	byValue := `{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"name":"mcp__internal-db__lookup","description":"Look up a host","input_schema":{"type":"object","properties":{"host":{"type":"string"}}}}},"cache_control":{"type":"ephemeral"}}`
+	in := []byte(`{"messages":[{"role":"user","content":"hi"},{"role":"system","content":[{"type":"text","text":"MCP server for real-target.example reconnected"},` + removal + `,` + byRef + `,` + byValue + `]}]}`)
+	out, err := Tokenize(in, markTransform)
+	if err != nil {
+		t.Fatalf("expected tool_addition/tool_removal blocks to be accepted, got: %v", err)
+	}
+	s := mustPretty(t, out)
+	for _, block := range []string{removal, byRef, byValue} {
+		if !strings.Contains(s, block) {
+			t.Fatalf("tool change block must pass through byte-for-byte, missing %s in: %s", block, s)
+		}
+	}
+	if !strings.Contains(s, `"text":"TOK:MCP server for real-target.example reconnected"`) {
+		t.Fatalf("text alongside tool change blocks not transformed: %s", s)
+	}
+}
+
+// TestTokenize_MidConversationToolChanges_UnexpectedShape_FailsClosed
+// pins the limit on the pass-through above, for each part of the shape
+// it's justified by.
+func TestTokenize_MidConversationToolChanges_UnexpectedShape_FailsClosed(t *testing.T) {
+	cases := map[string]string{
+		"extra field on block":         `{"type":"tool_addition","tool":{"type":"tool_reference","name":"q"},"note":"real-target.example"}`,
+		"extra field on reference":     `{"type":"tool_removal","tool":{"type":"tool_reference","name":"q","note":"real-target.example"}}`,
+		"extra field on definition":    `{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"name":"q"},"note":"real-target.example"}}`,
+		"definition in a removal":      `{"type":"tool_removal","tool":{"type":"tool_definition","definition":{"name":"q"}}}`,
+		"definition not an object":     `{"type":"tool_addition","tool":{"type":"tool_definition","definition":"real-target.example"}}`,
+		"unknown tool type":            `{"type":"tool_addition","tool":{"type":"some_future_tool_ref","name":"real-target.example"}}`,
+		"tool not an object":           `{"type":"tool_addition","tool":"real-target.example"}`,
+		"tool missing":                 `{"type":"tool_removal"}`,
+		"reference uses tool_name key": `{"type":"tool_removal","tool":{"type":"tool_reference","tool_name":"q"}}`,
+	}
+	for name, block := range cases {
+		t.Run(name, func(t *testing.T) {
+			in := []byte(`{"messages":[{"role":"system","content":[` + block + `]}]}`)
+			out, err := Tokenize(in, markTransform)
+			if err == nil {
+				t.Fatalf("expected fail closed, got output: %s", out)
+			}
+			if !strings.Contains(err.Error(), "tool_addition") && !strings.Contains(err.Error(), "tool_removal") {
+				t.Fatalf("expected the error to name the block type, got: %v", err)
+			}
+		})
+	}
+}
+
 // TestDetokenize_UnrecognizedContentBlockType_StillFailsOpen confirms
 // Tokenize's new fail-closed behavior for an unrecognized block type
 // does NOT change Detokenize's own, deliberately different, fail-open

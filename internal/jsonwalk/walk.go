@@ -695,10 +695,13 @@ func collectBlockArrayPaths(blocks gjson.Result, basePath string, paths *[]strin
 					case subType == "tool_reference":
 						// Client-side tool search (Claude Code's
 						// ToolSearch) returns these to load a deferred
-						// tool. Nothing to redact; see
-						// unexpectedToolReferenceField.
-						if f := unexpectedToolReferenceField(sub); f != "" && unknownType == "" {
-							unknownType = fmt.Sprintf("tool_reference (with unexpected field %q)", f)
+						// tool. tool_name must match a tools[] entry
+						// byte-for-byte, so tokenizing it would break
+						// the reference, and the same name already goes
+						// upstream unredacted in tools[] and in
+						// tool_use's "name". Nothing to redact.
+						if p := shapeProblem(sub, "type", "tool_name", "cache_control"); p != "" && unknownType == "" {
+							unknownType = fmt.Sprintf("tool_reference (%s)", p)
 						}
 					default:
 						if unknownType == "" {
@@ -710,6 +713,11 @@ func collectBlockArrayPaths(blocks gjson.Result, basePath string, paths *[]strin
 			}
 		case "tool_use", "mcp_tool_use":
 			*inputPaths = append(*inputPaths, blockBase+".input")
+		case "tool_addition", "tool_removal":
+			// Nothing to redact; see toolChangeProblem.
+			if p := toolChangeProblem(block); p != "" && unknownType == "" {
+				unknownType = fmt.Sprintf("%s (%s)", typ, p)
+			}
 		default:
 			if unknownType == "" {
 				unknownType = typ
@@ -720,35 +728,66 @@ func collectBlockArrayPaths(blocks gjson.Result, basePath string, paths *[]strin
 	return unknownType
 }
 
-// toolReferenceFields are the only keys a tool_reference sub-block may
-// carry for it to pass through untouched.
-var toolReferenceFields = map[string]bool{
-	"type":          true,
-	"tool_name":     true,
-	"cache_control": true,
-}
-
-// unexpectedToolReferenceField returns the first key of a tool_reference
-// sub-block outside toolReferenceFields (empty string if none).
+// shapeProblem reports why v isn't a JSON object whose keys all come
+// from allowed (empty string if it is).
 //
-// A tool_reference carries no content of its own: tool_name must match
-// a tools[] entry byte-for-byte for the API to load that tool, so
-// tokenizing it would break the reference, and the same name already
-// goes upstream unredacted in tools[] (never walked) and in tool_use's
-// "name" (a protocol field). Skipping it therefore exposes nothing new.
-// That reasoning only holds for exactly this shape, though: a
-// tool_reference that grows any other field is reported as unrecognized
-// rather than skipped, so whatever that field holds can never ride
-// through unredacted just because its block type is known.
-func unexpectedToolReferenceField(block gjson.Result) (field string) {
-	block.ForEach(func(key, _ gjson.Result) bool {
-		if !toolReferenceFields[key.String()] {
-			field = key.String()
+// Used for the block types collectBlockArrayPaths passes through
+// without scanning. Skipping each of them is justified only by what its
+// known fields hold (tool names, model names, tool definitions -- none
+// of it client content), and that reasoning says nothing about a field
+// added later, which could hold anything. So a pass-through block with
+// any other key is reported as unrecognized instead, rather than riding
+// through unredacted just because its type is known.
+func shapeProblem(v gjson.Result, allowed ...string) string {
+	if !v.IsObject() {
+		return "not an object"
+	}
+	var problem string
+	v.ForEach(func(key, _ gjson.Result) bool {
+		if !slices.Contains(allowed, key.String()) {
+			problem = fmt.Sprintf("unexpected field %q", key.String())
 			return false
 		}
 		return true
 	})
-	return field
+	return problem
+}
+
+// toolChangeProblem checks a tool_addition / tool_removal block
+// (mid-conversation tool changes) against its exact known shape, the
+// same way shapeProblem does for a single object. Claude Code sends
+// these in a role "system" message when an MCP server connects or
+// disconnects mid-session, naming the tool either by reference (a
+// tool_reference whose "name" must match a tools[] entry byte-for-byte)
+// or, for an addition only, by value (a tool_definition wrapping a whole
+// tools[] entry). Neither carries client content: the definition is the
+// same harness-authored data the top-level "tools" array holds, which
+// is never walked (see collectPaths), so passing it through unscanned
+// here is consistent with that rather than a new exposure.
+func toolChangeProblem(block gjson.Result) string {
+	if p := shapeProblem(block, "type", "tool", "cache_control"); p != "" {
+		return p
+	}
+	tool := block.Get("tool")
+	switch toolType := tool.Get("type").String(); toolType {
+	case "tool_reference":
+		if p := shapeProblem(tool, "type", "name"); p != "" {
+			return "tool reference " + p
+		}
+	case "tool_definition":
+		if block.Get("type").String() != "tool_addition" {
+			return "tool_definition outside a tool_addition"
+		}
+		if p := shapeProblem(tool, "type", "definition"); p != "" {
+			return "tool definition " + p
+		}
+		if !tool.Get("definition").IsObject() {
+			return "tool definition not an object"
+		}
+	default:
+		return fmt.Sprintf("unexpected tool type %q", toolType)
+	}
+	return ""
 }
 
 // collectLeafStrings recursively finds every string leaf inside an
