@@ -692,6 +692,14 @@ func collectBlockArrayPaths(blocks gjson.Result, basePath string, paths *[]strin
 						*paths = append(*paths, fmt.Sprintf("%s.content.%d.text", blockBase, ti.Int()))
 					case skipBlockTypes[subType]:
 						// intentionally skipped, e.g. an image sub-block
+					case subType == "tool_reference":
+						// Client-side tool search (Claude Code's
+						// ToolSearch) returns these to load a deferred
+						// tool. Nothing to redact; see
+						// unexpectedToolReferenceField.
+						if f := unexpectedToolReferenceField(sub); f != "" && unknownType == "" {
+							unknownType = fmt.Sprintf("tool_reference (with unexpected field %q)", f)
+						}
 					default:
 						if unknownType == "" {
 							unknownType = subType
@@ -710,6 +718,37 @@ func collectBlockArrayPaths(blocks gjson.Result, basePath string, paths *[]strin
 		return true
 	})
 	return unknownType
+}
+
+// toolReferenceFields are the only keys a tool_reference sub-block may
+// carry for it to pass through untouched.
+var toolReferenceFields = map[string]bool{
+	"type":          true,
+	"tool_name":     true,
+	"cache_control": true,
+}
+
+// unexpectedToolReferenceField returns the first key of a tool_reference
+// sub-block outside toolReferenceFields (empty string if none).
+//
+// A tool_reference carries no content of its own: tool_name must match
+// a tools[] entry byte-for-byte for the API to load that tool, so
+// tokenizing it would break the reference, and the same name already
+// goes upstream unredacted in tools[] (never walked) and in tool_use's
+// "name" (a protocol field). Skipping it therefore exposes nothing new.
+// That reasoning only holds for exactly this shape, though: a
+// tool_reference that grows any other field is reported as unrecognized
+// rather than skipped, so whatever that field holds can never ride
+// through unredacted just because its block type is known.
+func unexpectedToolReferenceField(block gjson.Result) (field string) {
+	block.ForEach(func(key, _ gjson.Result) bool {
+		if !toolReferenceFields[key.String()] {
+			field = key.String()
+			return false
+		}
+		return true
+	})
+	return field
 }
 
 // collectLeafStrings recursively finds every string leaf inside an

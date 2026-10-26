@@ -380,6 +380,58 @@ func TestTokenize_UnrecognizedToolResultSubBlockType_FailsClosed(t *testing.T) {
 	}
 }
 
+// TestTokenize_ToolResultToolReference_PassesThrough is a regression
+// test: Claude Code's client-side tool search (ToolSearch) answers with
+// a tool_result whose content is tool_reference sub-blocks, and those
+// used to hit the unrecognized-type default, blocking every request
+// after the first deferred tool was loaded. The references must pass
+// through byte-for-byte (tool_name has to keep matching tools[]) while
+// real content elsewhere in the same message is still tokenized.
+func TestTokenize_ToolResultToolReference_PassesThrough(t *testing.T) {
+	in := []byte(`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"tool_reference","tool_name":"WebFetch"},{"type":"tool_reference","tool_name":"mcp__internal-db__query","cache_control":{"type":"ephemeral"}}]},{"type":"text","text":"now scan real-target.example"}]}]}`)
+	out, err := Tokenize(in, markTransform)
+	if err != nil {
+		t.Fatalf("expected tool_reference sub-blocks to be accepted, got: %v", err)
+	}
+	s := mustPretty(t, out)
+	for _, ref := range []string{
+		`{"type":"tool_reference","tool_name":"WebFetch"}`,
+		`{"type":"tool_reference","tool_name":"mcp__internal-db__query","cache_control":{"type":"ephemeral"}}`,
+	} {
+		if !strings.Contains(s, ref) {
+			t.Fatalf("tool_reference must pass through byte-for-byte, missing %s in: %s", ref, s)
+		}
+	}
+	if !strings.Contains(s, `"text":"TOK:now scan real-target.example"`) {
+		t.Fatalf("text alongside a tool_reference result not transformed: %s", s)
+	}
+}
+
+// TestTokenize_ToolReferenceWithUnexpectedField_FailsClosed pins the
+// limit on the pass-through above: it's justified only for the exact
+// tool_reference shape, so one carrying any other field must still
+// block rather than let that field's value reach the model untouched.
+func TestTokenize_ToolReferenceWithUnexpectedField_FailsClosed(t *testing.T) {
+	in := []byte(`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"tool_reference","tool_name":"WebFetch","description":"queries widgetcorp-secret.example"}]}]}]}`)
+	out, err := Tokenize(in, markTransform)
+	if err == nil {
+		t.Fatalf("expected a tool_reference with an unexpected field to fail closed, got output: %s", out)
+	}
+	if !strings.Contains(err.Error(), "tool_reference") || !strings.Contains(err.Error(), "description") {
+		t.Fatalf("expected the error to name the block type and the unexpected field, got: %v", err)
+	}
+}
+
+// TestTokenize_TopLevelToolReference_FailsClosed: tool_reference is
+// only accepted nested in a tool_result's content, where tool search
+// puts it, not as a message-level content block.
+func TestTokenize_TopLevelToolReference_FailsClosed(t *testing.T) {
+	in := []byte(`{"messages":[{"role":"user","content":[{"type":"tool_reference","tool_name":"WebFetch"}]}]}`)
+	if _, err := Tokenize(in, markTransform); err == nil || !strings.Contains(err.Error(), "tool_reference") {
+		t.Fatalf("expected a message-level tool_reference to fail closed, got err: %v", err)
+	}
+}
+
 // TestDetokenize_UnrecognizedContentBlockType_StillFailsOpen confirms
 // Tokenize's new fail-closed behavior for an unrecognized block type
 // does NOT change Detokenize's own, deliberately different, fail-open
