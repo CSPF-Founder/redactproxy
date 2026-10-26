@@ -1045,7 +1045,19 @@ var bearerRe = regexp.MustCompile(`(?i)\bBearer[ \t]+([A-Za-z0-9_\-.~+/]{20,}={0
 // bearerDetector.Detect below, applied only to matches from this regex
 // (not bearerRe's tightly-framed "Bearer <token>" matches, which don't
 // need it and are left alone).
-var bareCredentialKeywordRe = regexp.MustCompile(`(?i:\bapi[ _-]?key\b|\baccess[ _-]?token\b|\bauth[ _-]?token\b|\bsecret[ _-]?key\b|\bclient[ _-]?secret\b|\bauth[ _-]?key\b|\baccess[ _-]?key\b|\bapi[ _-]?secret\b)(?:.|[\n\r]){0,200}?\b([A-Za-z0-9_-]{20,})\b`)
+//
+// The keyword is delimited by any non-alphanumeric character, not \b:
+// "_" is a word character to \b, so a keyword inside an env-var-style
+// name -- REACT_APP_WSO2_CLIENT_SECRET, MY_SERVICE_API_KEY, the most
+// common way a credential is labeled in a config dump -- had no word
+// boundary in front of it and never matched, and its value leaked. The
+// delimiters are consumed rather than asserted (RE2 has no lookbehind),
+// which is harmless: only capture group 1, the value, is ever used.
+//
+// client_id and consumer_key/consumer_secret are OAuth client
+// credentials (an id/secret pair, e.g. WSO2's), labeled exactly like the
+// API keys above.
+var bareCredentialKeywordRe = regexp.MustCompile(`(?i:(?:^|[^a-z0-9])(?:api[ _-]?key|access[ _-]?token|auth[ _-]?token|secret[ _-]?key|client[ _-]?secret|client[ _-]?id|consumer[ _-]?(?:key|secret)|auth[ _-]?key|access[ _-]?key|api[ _-]?secret)(?:$|[^a-z0-9]))(?:.|[\n\r]){0,200}?\b([A-Za-z0-9_-]{20,})\b`)
 
 // awsSecretValueShapeRe is the exact value shape awsSecretKeyKeywordRe
 // requires (40 base64-alphabet characters, no underscore/hyphen/tilde).

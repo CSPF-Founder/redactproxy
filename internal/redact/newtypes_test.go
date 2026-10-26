@@ -99,6 +99,61 @@ func TestBearerToken_BareAPIKeyWithLabel_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestBearerToken_EnvVarStyleKeywordAndOAuthClientCredentials is a
+// regression for a real leak: a credential keyword inside an
+// env-var-style name (REACT_APP_WSO2_CLIENT_SECRET) never matched, since
+// "_" left no \b in front of the keyword, so the value went out as-is.
+// Also covers the OAuth client id/secret keywords added alongside.
+func TestBearerToken_EnvVarStyleKeywordAndOAuthClientCredentials(t *testing.T) {
+	cases := map[string]string{
+		`REACT_APP_WSO2_CLIENT_SECRET:"Ab3kZ9qTdX0mNoP1rStUvWxYz01a"`: "Ab3kZ9qTdX0mNoP1rStUvWxYz01a",
+		`export MY_SERVICE_API_KEY=sk9Fh2Kd8Lm3Pq7Rt5Vw1Xy4Za6`:       "sk9Fh2Kd8Lm3Pq7Rt5Vw1Xy4Za6",
+		`client_id=Qq7WmZ3kLp9XvB2nRt5YcH8dFj4s`:                      "Qq7WmZ3kLp9XvB2nRt5YcH8dFj4s",
+		`"consumerSecret": "Zr8Kq2Wm5Np9Xt3Lv7Bd1Hs6Jc4"`:             "Zr8Kq2Wm5Np9Xt3Lv7Bd1Hs6Jc4",
+		`WSO2_CONSUMER_KEY = Hn4Tz8Qw2Lp6Xc9Vb3Mk7Rd5Fy1`:             "Hn4Tz8Qw2Lp6Xc9Vb3Mk7Rd5Fy1",
+		"oauth:\n  client-secret: Pm2Lq8Xz4Wn6Kt9Rb3Vc7Hd5Jy1\n":      "Pm2Lq8Xz4Wn6Kt9Rb3Vc7Hd5Jy1",
+	}
+	for in, secret := range cases {
+		e := newTypesEngine(t)
+		out, err := e.Tokenize(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(out, secret) {
+			t.Fatalf("credential leaked: %q -> %q", in, out)
+		}
+		if !strings.Contains(out, tokenstore.TokenBearerPrefix) {
+			t.Fatalf("expected the bearer placeholder, got %q", out)
+		}
+		if back := e.Detokenize(out); back != in {
+			t.Fatalf("round-trip mismatch:\n  in:   %q\n  out:  %q\n  back: %q", in, out, back)
+		}
+	}
+}
+
+// TestBearerToken_KeywordInsideLongerWordLeftAlone is the false-positive
+// guard for the delimiter change above: the keyword must still be a
+// whole word between non-alphanumerics, so "client_identity" is not
+// "client_id", and a digit-free value next to a matching key is still
+// treated as a name, not a secret.
+func TestBearerToken_KeywordInsideLongerWordLeftAlone(t *testing.T) {
+	cases := []string{
+		"client_identity_provider: Okta2024TenantForStaffLogin",
+		"apikeys_rotated_count: 20240501123456789012",
+		"MY_CLIENT_SECRET_SOURCE=VAULT_PATH_FOR_PRODUCTION_SECRETS",
+	}
+	for _, in := range cases {
+		e := newTypesEngine(t)
+		out, err := e.Tokenize(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(out, tokenstore.TokenBearerPrefix) {
+			t.Fatalf("expected no credential placeholder for %q, got %q", in, out)
+		}
+	}
+}
+
 // TestBearerToken_BareHighEntropyValueNoKeywordLeftAlone is the false-
 // positive guard for the fix above: a bare 20+ char token-shaped string
 // with no credential-labeling keyword anywhere nearby (a git SHA, a
