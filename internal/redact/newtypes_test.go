@@ -154,6 +154,54 @@ func TestBearerToken_KeywordInsideLongerWordLeftAlone(t *testing.T) {
 	}
 }
 
+// TestBasicAuth_CredentialRedacted: an HTTP Basic credential is just
+// base64 of "user:password", so it carries the password in reversible
+// form, and used to go upstream as-is (only "Bearer" was handled).
+func TestBasicAuth_CredentialRedacted(t *testing.T) {
+	cases := map[string]string{
+		"Authorization: Basic UXE3VzpzZWNyZXQ=":                                    "UXE3VzpzZWNyZXQ=",
+		`curl -H "Authorization: Basic YWRtaW46UEBzc3cwcmQh" https://target/admin`: "YWRtaW46UEBzc3cwcmQh",
+		"authorization: basic c3ZjOmh1bnRlcjI=\r\n":                                "c3ZjOmh1bnRlcjI=",
+	}
+	for in, cred := range cases {
+		e := newTypesEngine(t)
+		out, err := e.Tokenize(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(out, cred) {
+			t.Fatalf("basic credential leaked: %q -> %q", in, out)
+		}
+		if !strings.Contains(out, tokenstore.TokenBearerPrefix) {
+			t.Fatalf("expected the bearer placeholder, got %q", out)
+		}
+		if back := e.Detokenize(out); back != in {
+			t.Fatalf("round-trip mismatch:\n  in:   %q\n  out:  %q\n  back: %q", in, out, back)
+		}
+	}
+}
+
+// TestBasicAuth_NonCredentialLeftAlone: "Basic" followed by something
+// that doesn't decode to "user:password" is left untouched.
+func TestBasicAuth_NonCredentialLeftAlone(t *testing.T) {
+	cases := []string{
+		"Basic authentication is enabled on /admin",
+		`WWW-Authenticate: Basic realm="Restricted"`,
+		"Basic SGVsbG8gV29ybGQ= is just base64 of a greeting",
+		"Basic blocks were reviewed",
+	}
+	for _, in := range cases {
+		e := newTypesEngine(t)
+		out, err := e.Tokenize(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out != in {
+			t.Fatalf("expected %q untouched, got %q", in, out)
+		}
+	}
+}
+
 // TestPassword_LabeledValueRedacted covers secrets.password: a
 // human-chosen password next to a password-like key, in the shapes a
 // pentest actually turns up (env/config dumps, JSON, YAML, tool output),

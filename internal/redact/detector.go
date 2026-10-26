@@ -19,11 +19,14 @@
 package redact
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"net/netip"
 	"regexp"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/CSPF-Founder/redactproxy/internal/tokenstore"
@@ -1080,6 +1083,31 @@ var bareCredentialKeywordRe = regexp.MustCompile(`(?i:(?:^|[^a-z0-9])(?:api[ _-]
 // span), not just that the value happens to be the right shape.
 var awsSecretValueShapeRe = regexp.MustCompile(`^[A-Za-z0-9/+]{40}$`)
 
+// basicAuthRe matches an HTTP Basic credential: "Basic " then standard
+// base64 of "user:password". Unlike a bearer token it can be short (a
+// 4-char user and password encode to 12 characters), so the length
+// floor that keeps bearerRe precise doesn't apply; isBasicCredential
+// does that job instead, by decoding it.
+var basicAuthRe = regexp.MustCompile(`\b(?i:basic)[ \t]+([A-Za-z0-9+/]{4,}={0,2})(?:[^A-Za-z0-9+/=]|$)`)
+
+// isBasicCredential reports whether b64 really is a Basic credential: it
+// decodes as padded standard base64 to printable text containing the
+// ":" between user and password. Ordinary words after "Basic" ("Basic
+// authentication is enabled") fail this, so the detector never fires on
+// prose.
+func isBasicCredential(b64 string) bool {
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil || !utf8.Valid(raw) || !bytes.ContainsRune(raw, ':') {
+		return false
+	}
+	for _, r := range string(raw) {
+		if !unicode.IsPrint(r) {
+			return false
+		}
+	}
+	return true
+}
+
 type bearerDetector struct{}
 
 func (bearerDetector) Detect(text string) ([]Detection, error) {
@@ -1110,6 +1138,11 @@ func (bearerDetector) Detect(text string) ([]Detection, error) {
 	}
 	for _, m := range bearerRe.FindAllStringSubmatchIndex(text, -1) {
 		claim(m[2], m[3]) // capture group 1: the token, not "Bearer "
+	}
+	for _, m := range basicAuthRe.FindAllStringSubmatchIndex(text, -1) {
+		if isBasicCredential(text[m[2]:m[3]]) {
+			claim(m[2], m[3]) // capture group 1: the credential, not "Basic "
+		}
 	}
 	for _, m := range bareCredentialKeywordRe.FindAllStringSubmatchIndex(text, -1) {
 		start, end := m[2], m[3]

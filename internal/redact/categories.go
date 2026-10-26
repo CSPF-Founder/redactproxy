@@ -38,7 +38,7 @@ func DefaultCategorizedDetectors() []CategorizedDetector {
 		{phoneDetector{}, "contact", "phone", "NANP-shaped (US/Canada) phone numbers."},
 		{intlPhoneDetector{}, "contact", "intl_phone", "Non-NANP international phone numbers."},
 		{jwtDetector, "secrets", "jwt", "JSON Web Tokens (JWTs)."},
-		{bearerDetector{}, "secrets", "bearer_token", "Opaque Bearer/API tokens following an Authorization header."},
+		{bearerDetector{}, "secrets", "bearer_token", "Opaque Bearer/API tokens and HTTP Basic credentials following an Authorization header."},
 		{pemKeyDetector{}, "secrets", "pem_key", "PEM-armored private key blocks."},
 		{connStringDetector{}, "secrets", "connection_string", "Database/service connection strings with embedded credentials."},
 		{itsdangerousDetector{}, "secrets", "itsdangerous_token", "Flask itsdangerous-signed tokens (session/CSRF tokens)."},

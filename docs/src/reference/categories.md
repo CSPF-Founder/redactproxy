@@ -112,7 +112,7 @@ the same source. This page is that list, grouped.
 
 | Category | Detects |
 |---|---|
-| `secrets.bearer_token` | Opaque Bearer/API tokens following an Authorization header. |
+| `secrets.bearer_token` | Opaque Bearer/API tokens and HTTP Basic credentials following an Authorization header. |
 | `secrets.connection_string` | Database/service connection strings with embedded credentials. |
 | `secrets.itsdangerous_token` | Flask itsdangerous-signed tokens (session/CSRF tokens). |
 | `secrets.jwt` | JSON Web Tokens (JWTs). |
