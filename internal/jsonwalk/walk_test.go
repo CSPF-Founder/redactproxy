@@ -489,6 +489,68 @@ func TestTokenize_MidConversationToolChanges_UnexpectedShape_FailsClosed(t *test
 	}
 }
 
+// TestTokenize_FallbackBlock_PassesThrough: after a server-side refusal
+// fallback switches models mid-response, the assistant turn Claude Code
+// echoes back can carry a fallback marker. It used to fail closed as
+// unrecognized; it must pass through byte-for-byte while the turn's text
+// is still scanned.
+func TestTokenize_FallbackBlock_PassesThrough(t *testing.T) {
+	fallback := `{"type":"fallback","from":{"model":"claude-fable-5-1"},"to":{"model":"claude-opus-4-8"}}`
+	in := []byte(`{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[` + fallback + `,{"type":"text","text":"scanning real-target.example"}]}]}`)
+	out, err := Tokenize(in, markTransform)
+	if err != nil {
+		t.Fatalf("expected a fallback block to be accepted, got: %v", err)
+	}
+	s := mustPretty(t, out)
+	if !strings.Contains(s, fallback) {
+		t.Fatalf("fallback block must pass through byte-for-byte: %s", s)
+	}
+	if !strings.Contains(s, `"text":"TOK:scanning real-target.example"`) {
+		t.Fatalf("text after a fallback block not transformed: %s", s)
+	}
+}
+
+// TestTokenize_FallbackBlock_UnexpectedShape_FailsClosed pins the limit
+// on the pass-through above.
+func TestTokenize_FallbackBlock_UnexpectedShape_FailsClosed(t *testing.T) {
+	cases := map[string]string{
+		"extra field on block":  `{"type":"fallback","from":{"model":"a"},"to":{"model":"b"},"note":"real-target.example"}`,
+		"extra field on from":   `{"type":"fallback","from":{"model":"a","note":"real-target.example"},"to":{"model":"b"}}`,
+		"to missing":            `{"type":"fallback","from":{"model":"a"}}`,
+		"model not a string":    `{"type":"fallback","from":{"model":{"x":"real-target.example"}},"to":{"model":"b"}}`,
+		"from not an object":    `{"type":"fallback","from":"real-target.example","to":{"model":"b"}}`,
+		"model missing from to": `{"type":"fallback","from":{"model":"a"},"to":{}}`,
+	}
+	for name, block := range cases {
+		t.Run(name, func(t *testing.T) {
+			in := []byte(`{"messages":[{"role":"assistant","content":[` + block + `]}]}`)
+			out, err := Tokenize(in, markTransform)
+			if err == nil {
+				t.Fatalf("expected fail closed, got output: %s", out)
+			}
+			if !strings.Contains(err.Error(), "fallback") {
+				t.Fatalf("expected the error to name the block type, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestDetokenize_FallbackBlock_RestOfResponseDetokenized: a
+// non-streaming response carrying a fallback marker must still have its
+// other blocks detokenized; the marker itself is left as-is.
+func TestDetokenize_FallbackBlock_RestOfResponseDetokenized(t *testing.T) {
+	in := []byte(`{"id":"msg_1","type":"message","role":"assistant","model":"claude-opus-4-8","content":[{"type":"fallback","from":{"model":"claude-fable-5-1"},"to":{"model":"claude-opus-4-8"}},{"type":"text","text":"found abc123.tok.internal"}]}`)
+	out := string(Detokenize(in, func(s string) string {
+		return strings.ReplaceAll(s, "abc123.tok.internal", "real-target.example")
+	}))
+	if !strings.Contains(out, `"text":"found real-target.example"`) {
+		t.Fatalf("text alongside a fallback block not detokenized: %s", out)
+	}
+	if !strings.Contains(out, `{"type":"fallback","from":{"model":"claude-fable-5-1"},"to":{"model":"claude-opus-4-8"}}`) {
+		t.Fatalf("fallback block changed: %s", out)
+	}
+}
+
 // TestDetokenize_UnrecognizedContentBlockType_StillFailsOpen confirms
 // Tokenize's new fail-closed behavior for an unrecognized block type
 // does NOT change Detokenize's own, deliberately different, fail-open

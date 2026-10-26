@@ -718,6 +718,11 @@ func collectBlockArrayPaths(blocks gjson.Result, basePath string, paths *[]strin
 			if p := toolChangeProblem(block); p != "" && unknownType == "" {
 				unknownType = fmt.Sprintf("%s (%s)", typ, p)
 			}
+		case "fallback":
+			// Nothing to redact; see fallbackProblem.
+			if p := fallbackProblem(block); p != "" && unknownType == "" {
+				unknownType = fmt.Sprintf("fallback (%s)", p)
+			}
 		default:
 			if unknownType == "" {
 				unknownType = typ
@@ -786,6 +791,28 @@ func toolChangeProblem(block gjson.Result) string {
 		}
 	default:
 		return fmt.Sprintf("unexpected tool type %q", toolType)
+	}
+	return ""
+}
+
+// fallbackProblem checks a fallback block against its exact known shape,
+// {"type":"fallback","from":{"model":...},"to":{"model":...}}. The API
+// puts one in an assistant turn wherever a server-side refusal fallback
+// switched models mid-response, and Claude Code may echo it back on the
+// next request. It's an audit marker naming two models: protocol data,
+// like the top-level "model" field, never client content.
+func fallbackProblem(block gjson.Result) string {
+	if p := shapeProblem(block, "type", "from", "to"); p != "" {
+		return p
+	}
+	for _, side := range []string{"from", "to"} {
+		v := block.Get(side)
+		if p := shapeProblem(v, "model"); p != "" {
+			return fmt.Sprintf("%q %s", side, p)
+		}
+		if v.Get("model").Type != gjson.String {
+			return fmt.Sprintf("%q model not a string", side)
+		}
 	}
 	return ""
 }
