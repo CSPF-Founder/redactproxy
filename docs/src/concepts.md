@@ -132,8 +132,12 @@ Deliberately not scanned:
 - `thinking` and `redacted_thinking` blocks. The text and its signature
   together are a cryptographic proof the API validates on replay, so any
   edit makes the next request fail.
-- Server-executed tool blocks (web search, code execution). These run on
-  Anthropic's own infrastructure and never carry local client data.
+- Server-executed tool blocks (web search, web fetch, code execution,
+  server-side tool search). These run on Anthropic's own infrastructure
+  and never carry local client data.
+- Server-side `compaction` blocks. Like thinking, the summary is signed
+  and must go back byte-for-byte, and it was written from the already
+  redacted conversation.
 - Images and documents, which are binary payloads rather than text.
 
 MCP tool calls and results **are** scanned, unlike the server-executed
@@ -151,7 +155,23 @@ not modified. What gets scanned is the copy of the exchange carried in
 the API body: an `mcp_tool_result` is tokenized on the way out, and an
 `mcp_tool_use` in a response is detokenized before Claude Code executes
 it, so the MCP server itself receives the real values, exactly as `Bash`
-does.
+does. The same goes for `search_result` blocks inside a tool result: a
+local search tool's titles, URLs and snippets are scanned like any other
+tool output.
+
+A few block types are protocol markers with no content of their own, and
+pass through unchanged: `tool_reference` (Claude Code loading a deferred
+tool through tool search), `tool_addition` and `tool_removal` (an MCP
+server connecting or disconnecting mid-session), and `fallback` (the API
+switched to another model after a refusal). Each is accepted only in its
+exact known shape; one carrying any other field is treated as unknown.
+
+Switching models never needs anything from the proxy, whether by `/model`
+or by a refusal fallback: placeholders are stable for the engagement, so
+the new model sees the same ones. If a refusal cuts a streamed response
+off mid-block, the partial text is still restored in full, so the copy
+Claude Code sends back when it continues on a fallback model matches
+what the API produced.
 
 The rewrite is surgical: only the matched spans change, and every other
 byte, including JSON key order, is preserved. That matters because
@@ -174,10 +194,12 @@ What follows from that:
   `base64` doesn't look like anything to a regex. Decode it locally
   first.
 - **False positives happen.** The proxy inspects text and has no notion
-  of code structure, so something merely domain-shaped (`table.style`,
-  where `.style` is a real suffix) can occasionally get tokenized. This
-  is harmless in operation, since the real value is substituted back
-  before anything executes, and `rules allow` fixes it permanently.
+  of code structure, so something merely domain-shaped (`config.live`,
+  where `.live` is a real suffix) can occasionally get tokenized. Method
+  calls like `datetime.now()` and filename-like names like `server.py`
+  are recognized and left alone. The rest is harmless in operation,
+  since the real value is substituted back before anything executes,
+  and `rules allow` fixes it permanently.
 
 ## Fail closed
 
@@ -185,7 +207,10 @@ If the proxy cannot finish redacting a request, it returns an error
 rather than forwarding bytes. An unredacted forward is the one outcome
 this project treats as worse than a broken request. A malformed body, a
 detector that errors, a token store that can't commit: all of them fail
-the request instead of passing it through.
+the request instead of passing it through. So does a content block of a
+type the proxy doesn't recognize, such as one from a newer API feature:
+the request is refused with an error naming the type, rather than
+forwarded with that block unscanned.
 
 ## Cost
 

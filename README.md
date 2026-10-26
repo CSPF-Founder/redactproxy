@@ -204,11 +204,16 @@ You can type the same things into a running proxy's terminal (`show`,
 `remove <value>`, `rules ...`, `help`) if you'd rather not interrupt a
 session to fix a mapping.
 
-Rule changes only affect text tokenized from that point on. Adding a
-`block` rule won't scrub a value that already reached the model earlier
-in the same conversation, so start a fresh one if that matters.
-Disabling a category likewise only gates future detection; anything
-already tokenized keeps detokenizing correctly.
+Rule changes apply to everything sent from then on, including the
+earlier turns Claude Code resends with every request, because the proxy
+re-redacts the whole history each time. That cuts both ways. A new
+`block` rule scrubs the value from every later request, but can't recall
+the requests that already carried it, so start a fresh conversation if
+that matters. And disabling a category or adding an `allow` entry
+un-redacts too: the next request sends those earlier values in the
+clear, even if they were tokenized before. Change those before a
+conversation starts, not in the middle of one. See [Where rules do and
+don't reach back](https://cspf-founder.github.io/redactproxy/security/gaps.html#where-rules-do-and-dont-reach-back).
 
 ### Blocking a domain
 

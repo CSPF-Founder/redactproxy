@@ -139,7 +139,7 @@ placeholders you copy by hand.
 
 **An unfamiliar placeholder is not a bug.** It is either a token doing
 its job, or an over-redaction of something merely domain-shaped
-(`table.style`, where `.style` is a real suffix). Either way the real
+(`config.live`, where `.live` is a real suffix). Either way the real
 value is substituted before execution, on every response rather than
 just the first, so the command runs correctly regardless. The real
 filesystem is ground truth here, since the proxy only ever inspects API

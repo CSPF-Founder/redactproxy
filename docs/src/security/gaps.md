@@ -116,7 +116,14 @@ exactly what is missing. See
 
 The opposite failure, and mostly harmless. The proxy inspects text with
 no notion of code structure, so something merely domain-shaped
-(`table.style`, where `.style` is a real suffix) can get tokenized.
+(`config.live`, where `.live` is a real suffix) can get tokenized.
+
+Two common code shapes are handled: names that look like filenames on a
+colliding TLD (`main.rs`, `server.py`, `table.style`), and method calls
+whose name is also a TLD (`datetime.now()`, `subprocess.run(...)`,
+`m.group(1)`), recognized by the `(` that follows. Plain attribute
+access (`config.live`, `user.email`) has no such signal and can still be
+tokenized.
 
 Operationally this costs nothing: the real value is substituted back
 before anything executes, on every response rather than just the first,
@@ -136,9 +143,23 @@ paths, `domain\username`, LDAP DN components). See CONTRIBUTING.md.
 
 ## Where rules do and don't reach back
 
-Rule changes only affect text tokenized from that point on. Adding a
-block rule does not scrub a value that already reached the model earlier
-in the same conversation. Start a fresh conversation if that matters.
+Claude Code resends the whole conversation on every request, with the
+real values in it, and the proxy redacts all of it each time. So a rule
+change applies to every request from then on, earlier turns included:
 
-Disabling a category likewise only gates future detection. Anything
-already tokenized keeps detokenizing correctly.
+- **Adding a block rule** scrubs the value from every later request,
+  earlier turns included. It cannot recall the requests that already
+  carried it. Start a fresh conversation if that matters.
+- **Disabling a category, or adding an allow entry, un-redacts.** The
+  next request sends the matching values from earlier turns in the
+  clear, even though earlier requests carried them tokenized. Make
+  these changes before a conversation starts, not in the middle of one.
+  Placeholders already minted keep detokenizing correctly either way.
+
+Any of these changes also rewrites earlier turns, which the API sees as
+an edited history. That costs one prompt-cache miss, and on models that
+bind thinking blocks to the conversation (Claude Opus 5.5 and Fable 5.1,
+for example) the API may drop or reject the earlier thinking blocks. If
+requests start failing after a rule change, start a fresh conversation.
+Upgrading redactproxy in the middle of a conversation has the same
+effect whenever the new version detects more, or less, than the old one.

@@ -20,11 +20,14 @@ wizard, the proxy console, or a hand edit reaches a running proxy within
 a couple of seconds. No restart, and no dropped in-flight request.
 
 > [!IMPORTANT]
-> Rule changes only affect text tokenized from that point on. Adding a
-> block rule will not scrub a value that already reached the model
-> earlier in the same conversation. If that matters, start a fresh
-> conversation. Disabling a category likewise only gates future
-> detection; anything already tokenized keeps detokenizing correctly.
+> Rule changes apply to everything sent from then on, including the
+> earlier turns Claude Code resends with every request. A new block rule
+> scrubs the value from later requests but cannot recall the ones that
+> already carried it; start a fresh conversation if that matters.
+> Disabling a category or adding an allow entry **un-redacts** earlier
+> turns on the next request, so make those changes before a
+> conversation starts. See
+> [Where rules do and don't reach back](./security/gaps.md#where-rules-do-and-dont-reach-back).
 
 If a reload finds `rules.json` invalid, the proxy logs the error and
 keeps the previous rules active rather than starting to send unredacted

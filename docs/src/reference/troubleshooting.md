@@ -156,15 +156,15 @@ cannot be rewritten. **Start a new conversation.**
 ## Something innocent is being redacted
 
 Over-redaction. The proxy inspects text with no notion of code
-structure, so something merely domain-shaped (`table.style`) can get
+structure, so something merely domain-shaped (`config.live`) can get
 tokenized.
 
 It costs nothing operationally, since the real value is substituted back
 before anything executes. To stop it:
 
 ```bash
-redactproxy rules allow "table.style"       # stop redacting it
-redactproxy tokens remove "table.style"     # drop the mapping already minted
+redactproxy rules allow "config.live"       # stop redacting it
+redactproxy tokens remove "config.live"     # drop the mapping already minted
 ```
 
 ## A rule I added isn't doing anything
