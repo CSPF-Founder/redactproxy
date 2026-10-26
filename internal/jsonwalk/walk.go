@@ -732,6 +732,11 @@ func collectBlockArrayPaths(blocks gjson.Result, basePath string, paths *[]strin
 			if p := fallbackProblem(block); p != "" && unknownType == "" {
 				unknownType = fmt.Sprintf("fallback (%s)", p)
 			}
+		case "compaction":
+			// Never touched, like thinking; see compactionProblem.
+			if p := compactionProblem(block); p != "" && unknownType == "" {
+				unknownType = fmt.Sprintf("compaction (%s)", p)
+			}
 		default:
 			if unknownType == "" {
 				unknownType = typ
@@ -824,6 +829,51 @@ func fallbackProblem(block gjson.Result) string {
 		}
 	}
 	return ""
+}
+
+// compactionProblem checks a compaction block (server-side compaction's
+// summary of the turns it replaces) against its exact known shape.
+//
+// It's never touched in either direction, for the same two reasons as
+// thinking blocks (see skipBlockTypes). The block is signed: the API
+// rejects it on replay if a single byte of its summary changed. And the
+// summary was written by the model from the conversation as the model
+// received it -- already tokenized -- so it holds nothing from the
+// local side that hasn't already gone upstream; leaving the response
+// copy untouched means the client echoes back exactly those bytes. Its
+// tool_changes (tool changes the summarized turns made, carried past
+// the summary) get the same shape check as standalone ones.
+func compactionProblem(block gjson.Result) string {
+	if p := shapeProblem(block, "type", "content", "encrypted_content", "tool_changes", "cache_control"); p != "" {
+		return p
+	}
+	if c := block.Get("content"); c.Exists() && c.Type != gjson.String && c.Type != gjson.Null {
+		return "content not a string"
+	}
+	if e := block.Get("encrypted_content"); e.Exists() && e.Type != gjson.String {
+		return "encrypted_content not a string"
+	}
+	tc := block.Get("tool_changes")
+	if !tc.Exists() {
+		return ""
+	}
+	if !tc.IsArray() {
+		return "tool_changes not an array"
+	}
+	var problem string
+	tc.ForEach(func(_, change gjson.Result) bool {
+		typ := change.Get("type").String()
+		if typ != "tool_addition" && typ != "tool_removal" {
+			problem = fmt.Sprintf("tool_changes entry of type %q", typ)
+			return false
+		}
+		if p := toolChangeProblem(change); p != "" {
+			problem = fmt.Sprintf("tool_changes %s %s", typ, p)
+			return false
+		}
+		return true
+	})
+	return problem
 }
 
 // searchResultPaths returns the content-carrying string paths of a

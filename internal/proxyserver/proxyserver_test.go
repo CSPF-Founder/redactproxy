@@ -1178,6 +1178,54 @@ func TestProxy_Streaming_ThinkingBlockNeverModified(t *testing.T) {
 	}
 }
 
+// TestProxy_Streaming_CompactionBlockNeverModified is the compaction
+// counterpart of the thinking test above: a server-side compaction
+// block is signed, so its streamed summary must reach the client
+// byte-identical even when it contains a token, for the client to echo
+// it back unchanged.
+func TestProxy_Streaming_CompactionBlockNeverModified(t *testing.T) {
+	dir := t.TempDir()
+	store, err := tokenstore.Open(filepath.Join(dir, "tokens.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	token, err := store.GetOrCreateToken("widgetcorp-fixture.com", tokenstore.EntityDomain)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	summary := "Summary: assessing " + token
+	frames := []string{
+		sseFrame("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"compaction","content":""}}`),
+		sseFrame("content_block_delta", fmt.Sprintf(`{"type":"content_block_delta","index":0,"delta":{"type":"compaction_delta","content":%q,"encrypted_content":"EqQBCkgIARAB"}}`, summary)),
+		sseFrame("content_block_stop", `{"type":"content_block_stop","index":0}`),
+	}
+	upstream := sseUpstream(t, frames)
+	defer upstream.Close()
+
+	engine := redact.New(store, redact.DefaultDetectors()...)
+	upstreamURL, _ := url.Parse(upstream.URL)
+	srv := New(Config{Upstream: upstreamURL, Engine: engine})
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/v1/messages", "application/json", strings.NewReader(`{"stream":true,"messages":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	raw, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(raw), summary) {
+		t.Fatalf("compaction block content was modified; expected byte-identical passthrough of %q, got: %s", summary, raw)
+	}
+	if strings.Contains(string(raw), "widgetcorp-fixture.com") {
+		t.Fatalf("compaction block was detokenized: %s", raw)
+	}
+}
+
 // TestServer_StreamingReleasesSemaphoreBeforeStreamEnds confirms the
 // concurrency semaphore only bounds body-buffering, not the full SSE
 // streaming duration: with MaxConcurrent set well below the number of

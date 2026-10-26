@@ -611,6 +611,71 @@ func TestTokenize_SearchResult_UnexpectedShape_FailsClosed(t *testing.T) {
 	}
 }
 
+// TestTokenize_CompactionBlock_NeverTouched: a server-side compaction
+// block is signed, so like a thinking block it must go back
+// byte-for-byte -- even when its summary contains a value a detector
+// would otherwise match -- while the turns after it are still scanned.
+// It used to fail closed as unrecognized.
+func TestTokenize_CompactionBlock_NeverTouched(t *testing.T) {
+	compaction := `{"type":"compaction","content":"Summary: the user is assessing real-target.example","encrypted_content":"EqQBCkgIARABGAIiQHg","tool_changes":[{"type":"tool_addition","tool":{"type":"tool_reference","name":"mcp__db__query"}}]}`
+	in := []byte(`{"messages":[{"role":"assistant","content":[` + compaction + `]},{"role":"user","content":"now check real-target.example"}]}`)
+	out, err := Tokenize(in, markTransform)
+	if err != nil {
+		t.Fatalf("expected a compaction block to be accepted, got: %v", err)
+	}
+	s := mustPretty(t, out)
+	if !strings.Contains(s, compaction) {
+		t.Fatalf("compaction block must pass through byte-for-byte: %s", s)
+	}
+	if !strings.Contains(s, `"content":"TOK:now check real-target.example"`) {
+		t.Fatalf("message after a compaction block not transformed: %s", s)
+	}
+
+	nullContent := []byte(`{"messages":[{"role":"assistant","content":[{"type":"compaction","content":null}]}]}`)
+	if _, err := Tokenize(nullContent, markTransform); err != nil {
+		t.Fatalf("expected a compaction block with null content to be accepted, got: %v", err)
+	}
+}
+
+// TestTokenize_CompactionBlock_UnexpectedShape_FailsClosed pins the
+// limit on the pass-through above.
+func TestTokenize_CompactionBlock_UnexpectedShape_FailsClosed(t *testing.T) {
+	cases := map[string]string{
+		"extra field":                    `{"type":"compaction","content":"s","note":"real-target.example"}`,
+		"content not a string":           `{"type":"compaction","content":{"text":"real-target.example"}}`,
+		"encrypted_content not a string": `{"type":"compaction","content":"s","encrypted_content":["real-target.example"]}`,
+		"tool_changes not an array":      `{"type":"compaction","content":"s","tool_changes":{"type":"tool_addition"}}`,
+		"tool_changes unknown entry":     `{"type":"compaction","content":"s","tool_changes":[{"type":"text","text":"real-target.example"}]}`,
+		"tool_changes bad shape":         `{"type":"compaction","content":"s","tool_changes":[{"type":"tool_removal","tool":{"type":"tool_reference","name":"q","note":"real-target.example"}}]}`,
+	}
+	for name, block := range cases {
+		t.Run(name, func(t *testing.T) {
+			in := []byte(`{"messages":[{"role":"assistant","content":[` + block + `]}]}`)
+			out, err := Tokenize(in, markTransform)
+			if err == nil {
+				t.Fatalf("expected fail closed, got output: %s", out)
+			}
+			if !strings.Contains(err.Error(), "compaction") {
+				t.Fatalf("expected the error to name the block type, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestDetokenize_CompactionBlock_LeftAsIs: in a response, the signed
+// compaction block must reach the client unchanged (it has to echo the
+// exact bytes back), even if its summary contains a token.
+func TestDetokenize_CompactionBlock_LeftAsIs(t *testing.T) {
+	compaction := `{"type":"compaction","content":"Summary mentions abc123.tok.internal"}`
+	in := []byte(`{"id":"msg_1","type":"message","role":"assistant","content":[` + compaction + `]}`)
+	out := Detokenize(in, func(s string) string {
+		return strings.ReplaceAll(s, "abc123.tok.internal", "real-target.example")
+	})
+	if string(out) != string(in) {
+		t.Fatalf("compaction block changed on detokenize: %s", out)
+	}
+}
+
 // TestDetokenize_UnrecognizedContentBlockType_StillFailsOpen confirms
 // Tokenize's new fail-closed behavior for an unrecognized block type
 // does NOT change Detokenize's own, deliberately different, fail-open
