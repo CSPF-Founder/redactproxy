@@ -14,18 +14,33 @@ instead.
 
 **The most important one, and the one redaction cannot fix.**
 
-Claude Code puts its working directory, and a project-memory directory
-name derived from it, into the `system` field of every request. That
-field is deliberately never scanned: it is Anthropic's own prompt
-boilerplate, and blanket-scanning it does more harm than good.
+Claude Code sends your working directory with every request, in more
+than one place:
+
+- **The environment details in `messages`**, and, in auto mode, the
+  `safeguards` field. Both are scanned, so the path there is redacted
+  wherever it matches a detector or one of your `rules block` entries.
+- **The project-memory directory name in the `system` field.** Claude
+  Code builds it from the path with every `/` and `.` turned into `-`,
+  so `~/clients/acme-bank-pentest` becomes
+  `-home-you-clients-acme-bank-pentest`. That field is deliberately never
+  scanned: it is Anthropic's own prompt boilerplate, and blanket-scanning
+  it does more harm than good.
 
 So a folder called `acme-bank-pentest` sends "acme bank" to the model on
 every single request, bypassing every block and allow rule no matter how
-thorough `rules.json` is. The redaction engine never sees that text.
+thorough `rules.json` is. A `rules block` entry covers the copies in
+`messages` and `safeguards`, but not the one in `system`, and turning
+dots into dashes keeps even a domain-named folder like `acme-bank.com`
+from looking like a domain there.
 
-There is no fix in the tool. There is nothing to tokenize against,
-because the path is not part of the body the proxy edits. **Name
-engagement folders after an engagement code, never after the client.**
+A domain inside a path is also not detected on its own: in
+`/home/you/acme-bank.com/notes` it is redacted only once the proxy has
+seen `acme-bank.com` somewhere else, in the same request or earlier, or
+it is on your block list.
+
+There is no fix in the tool for the `system` copy. **Name engagement
+folders after an engagement code, never after the client.**
 
 redactproxy checks for this. If your working directory matches one of
 your own block entries, the wizard warns when you set up and the proxy

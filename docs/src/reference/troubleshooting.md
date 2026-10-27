@@ -113,9 +113,9 @@ level=WARN msg="current directory matches a block-list pattern and WILL be sent
 to the upstream API unredacted..."
 ```
 
-Your working directory is named after the client. Claude Code puts its
-working directory into a part of every request the proxy deliberately
-never scans, so that name reaches the model on every request regardless
+Your working directory is named after the client. Claude Code puts a
+name built from its working directory into a part of every request the
+proxy deliberately never scans, so that name reaches the model on every request regardless
 of your rules.
 
 There is no fix in the tool. Rename the folder to an engagement code and

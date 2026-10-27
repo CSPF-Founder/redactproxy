@@ -10,9 +10,9 @@ Work in one folder per client project. Everything below is per-folder:
 the engagement marker, the Claude Code settings, the `CLAUDE.md` note.
 
 > [!WARNING]
-> **Don't name the folder after the client.** Claude Code puts its own
-> working directory into a part of every request this proxy deliberately
-> never scans, so a folder called `acme-bank-pentest` sends "acme bank"
+> **Don't name the folder after the client.** Claude Code puts a name
+> built from its working directory into a part of every request this
+> proxy deliberately never scans, so a folder called `acme-bank-pentest` sends "acme bank"
 > to the model on every single request, no matter what your rules say.
 > Use an engagement code. This is the one leak redaction cannot close;
 > see [Known gaps](./security/gaps.md).

@@ -326,9 +326,10 @@ bodies. Known gaps:
 - Bare apex domains on file-extension TLDs (`.do`, `.ai`, `.rs`, `.sh`,
   `.py` and friends), since `main.rs` and `logo.ai` are far more often
   filenames. Use `rules block --domain` for those.
-- Your folder name. Claude Code puts the working directory in the
-  `system` field, which is never scanned, so don't name an engagement
-  folder after the client. redactproxy warns about it but can't fix it.
+- Your folder name. Claude Code puts a name derived from the working
+  directory in the `system` field, which is never scanned, so don't name
+  an engagement folder after the client. redactproxy warns about it but
+  can't fix it.
 - `thinking` blocks, which are signed by the API and so can't be
   rewritten. If a real value leaks some other way, the model can
   restate it there permanently. Start a new conversation.

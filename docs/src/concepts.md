@@ -124,11 +124,22 @@ Only the content-carrying strings inside a Messages API body: the
 `messages` array in a request, and the `content` array in a response.
 That is where operator and tool-output text lives.
 
+In auto mode, Claude Code also sends a `safeguards` field so the API can
+review each tool call before it runs. Its context repeats local details
+the conversation already describes: the working directory, the git
+remote, your permission allow and deny rules, and the auto-mode notes
+from your settings. Every text value in it is scanned with the same
+placeholders as the conversation, so the server's review sees the same
+redacted values the model does. Only the field's type tags and the
+tool-call IDs it refers to are left as they are. The review's verdicts
+come back in `safeguard_results`, which the proxy returns unchanged.
+
 Deliberately not scanned:
 
 - The top-level `system` field. It is Claude Code's own prompt
-  boilerplate, and this is where the working-directory leak in
-  [Known gaps](./security/gaps.md) comes from.
+  boilerplate, and the folder-name leak in
+  [Known gaps](./security/gaps.md) comes from the project-memory
+  directory name it carries.
 - `thinking` and `redacted_thinking` blocks. The text and its signature
   together are a cryptographic proof the API validates on replay, so any
   edit makes the next request fail.
