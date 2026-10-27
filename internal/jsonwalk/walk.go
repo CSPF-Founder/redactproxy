@@ -638,6 +638,10 @@ func collectPaths(raw []byte) (paths []string, inputPaths []string, unknownType 
 		})
 	}
 
+	if sg := root.Get("safeguards"); sg.Exists() {
+		collectSafeguardStrings(sg, "safeguards", &paths)
+	}
+
 	// Non-streaming responses are a single Message object with a
 	// top-level "content" array (no "messages" wrapper; the response
 	// IS the content, unlike a request body).
@@ -957,6 +961,51 @@ func collectLeafStrings(v gjson.Result, path string, out *[]string) {
 		i := 0
 		v.ForEach(func(_, val gjson.Result) bool {
 			collectLeafStrings(val, join(fmt.Sprintf("%d", i)), out)
+			i++
+			return true
+		})
+	}
+}
+
+// safeguardProtocolKeys are the keys under "safeguards" whose values
+// are protocol, not local context: the check's own type tags, and the
+// tool_use IDs a prior turn's context is attached to, which must keep
+// matching the IDs in "messages" byte for byte.
+var safeguardProtocolKeys = map[string]bool{
+	"type":         true,
+	"tool_use_ids": true,
+}
+
+// collectSafeguardStrings finds every string value under the top-level
+// "safeguards" request field, except those under safeguardProtocolKeys.
+//
+// In auto mode Claude Code sends this field so the server can review
+// tool calls itself, and its classifier_context carries a copy of local
+// state the conversation also describes: the working directory, the git
+// remote, the operator's permission allow/deny rules and auto-mode
+// environment notes. Those are exactly where an engagement's hostnames,
+// IPs and repository names turn up, and the copies in "messages" are
+// already tokenized, so leaving this field alone sent the real values
+// next to their tokens. Its shape is versioned by Claude Code ("v") and
+// grows over time, so it is walked generically rather than against a
+// field allowlist: an unknown field gets scanned instead of either
+// slipping through or blocking every auto-mode request. Object keys are
+// left alone; here they are the schema's own field names.
+func collectSafeguardStrings(v gjson.Result, path string, out *[]string) {
+	switch {
+	case v.Type == gjson.String:
+		*out = append(*out, path)
+	case v.IsObject():
+		v.ForEach(func(key, val gjson.Result) bool {
+			if !safeguardProtocolKeys[key.String()] {
+				collectSafeguardStrings(val, path+"."+escapeGJSONKey(key.String()), out)
+			}
+			return true
+		})
+	case v.IsArray():
+		i := 0
+		v.ForEach(func(_, val gjson.Result) bool {
+			collectSafeguardStrings(val, fmt.Sprintf("%s.%d", path, i), out)
 			i++
 			return true
 		})

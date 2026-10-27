@@ -21,6 +21,7 @@ import (
 	"github.com/CSPF-Founder/redactproxy/internal/debuglog"
 	"github.com/CSPF-Founder/redactproxy/internal/redact"
 	"github.com/CSPF-Founder/redactproxy/internal/tokenstore"
+	"github.com/tidwall/gjson"
 )
 
 func newTestServer(t *testing.T, upstream *httptest.Server) *httptest.Server {
@@ -175,6 +176,57 @@ func TestProxy_MultiTurn_ReTokenizesRealValueEchoedBackInConversationHistory(t *
 		if m != turn1Token {
 			t.Fatalf("turn 2 used a DIFFERENT token (%q) for the same real value turn 1 tokenized as %q -- consistency broken across turns", m, turn1Token)
 		}
+	}
+}
+
+// TestProxy_AutoModeSafeguards_TokenizedConsistentlyWithMessages: the
+// working directory and git remote auto mode copies into the safeguards
+// field must reach the upstream as the SAME tokens the conversation uses,
+// so the server-side review compares like with like, and the
+// safeguard_results verdict, keyed by tool_use ID, must come back to the
+// client unchanged.
+func TestProxy_AutoModeSafeguards_TokenizedConsistentlyWithMessages(t *testing.T) {
+	var captured []byte
+	verdict := `{"type":"message_delta","delta":{"stop_reason":"tool_use","safeguard_results":[{"type":"dangerous_tool_use","status":{"type":"available","tool_uses":{"toolu_01ABC":{"type":"evaluated","outcome":"not_flagged"}}}}]},"usage":{"output_tokens":5}}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, "event: message_delta\ndata: %s\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n", verdict)
+	}))
+	defer upstream.Close()
+	ts := newTestServer(t, upstream)
+
+	reqBody := `{"model":"m","stream":true,"messages":[{"role":"user","content":"Scope: widgetcorp-fixture.com. Working directory: /home/u/widgetcorp-fixture.com/eng"},` +
+		`{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01ABC","name":"Bash","input":{"command":"curl -s https://portal.widgetcorp-fixture.com/"}}]}],` +
+		`"safeguards":[{"type":"dangerous_tool_use","classifier_context":{"v":1,"live_cwd":"/home/u/widgetcorp-fixture.com/eng",` +
+		`"git_state":{"visibility":{"origin":{"host":"git.widgetcorp-fixture.com","remote":"acme/payroll"}}},` +
+		`"rules":{"deny":[{"rule":"Bash(ssh admin@10.20.30.40)"}]},` +
+		`"prior_turn_context":[{"tool_use_ids":["toolu_01ABC"],"context":{"live_cwd":"/home/u/widgetcorp-fixture.com/eng"}}]}}]}`
+	resp, err := http.Post(ts.URL+"/v1/messages", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+
+	sent := string(captured)
+	for _, real := range []string{"widgetcorp-fixture.com", "10.20.30.40"} {
+		if strings.Contains(sent, real) {
+			t.Fatalf("real value %q reached upstream: %s", real, sent)
+		}
+	}
+	msgTok := regexp.MustCompile(`tok[0-9a-f]{16}`).FindString(gjson.Get(sent, "messages.0.content").String())
+	if msgTok == "" {
+		t.Fatalf("expected the domain tokenized in messages: %s", sent)
+	}
+	if got := gjson.Get(sent, "safeguards.0.classifier_context.live_cwd").String(); got != "/home/u/"+msgTok+".com/eng" {
+		t.Fatalf("safeguards cwd tokenized differently from messages (%s): %s", msgTok, got)
+	}
+	if got := gjson.Get(sent, "safeguards.0.classifier_context.prior_turn_context.0.tool_use_ids.0").String(); got != "toolu_01ABC" {
+		t.Fatalf("tool_use_ids must pass through unchanged, got %q", got)
+	}
+	if !strings.Contains(string(out), verdict) {
+		t.Fatalf("safeguard_results verdict not passed back unchanged: %s", out)
 	}
 }
 

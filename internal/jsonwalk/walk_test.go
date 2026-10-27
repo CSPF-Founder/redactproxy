@@ -611,6 +611,59 @@ func TestTokenize_SearchResult_UnexpectedShape_FailsClosed(t *testing.T) {
 	}
 }
 
+// TestTokenize_Safeguards_ContextScanned: auto mode's "safeguards"
+// field repeats the working directory, git remote and permission rules
+// the conversation already carries tokenized; every string in it must be
+// scanned too, except the type tags and the tool_use IDs that tie a
+// prior turn's context to its blocks in "messages".
+func TestTokenize_Safeguards_ContextScanned(t *testing.T) {
+	in := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}],"safeguards":[{"type":"dangerous_tool_use","classifier_context":{"v":1,"permission_mode":"auto","live_cwd":"/home/u/real-target.example","git_state":{"visibility":{"origin":{"host":"git.real-target.example","remote":"acme/payroll","visibility":"private"}},"status":{"clean":false,"counts":{"staged":0}}},"rules":{"allow":[{"rule":"Bash(curl https://portal.real-target.example/*)","source":"localSettings"}]},"auto_mode":{"environment":["vpn.real-target.example"]},"prior_turn_context":[{"tool_use_ids":["toolu_01ABC"],"context":{"live_cwd":"/home/u/real-target.example","type":"snapshot"}}],"restricted":false,"some_future_field":{"note":"10.20.30.40"}}}]}`)
+	out, err := Tokenize(in, markTransform)
+	if err != nil {
+		t.Fatalf("expected a safeguards field to be accepted, got: %v", err)
+	}
+	s := mustPretty(t, out)
+	for _, want := range []string{
+		`"live_cwd":"TOK:/home/u/real-target.example"`,
+		`"host":"TOK:git.real-target.example"`,
+		`"remote":"TOK:acme/payroll"`,
+		`"rule":"TOK:Bash(curl https://portal.real-target.example/*)"`,
+		`"environment":["TOK:vpn.real-target.example"]`,
+		`"context":{"live_cwd":"TOK:/home/u/real-target.example","type":"snapshot"}`,
+		`"note":"TOK:10.20.30.40"`,
+		`"type":"dangerous_tool_use"`,
+		`"tool_use_ids":["toolu_01ABC"]`,
+		`"v":1`,
+		`"restricted":false`,
+		`"counts":{"staged":0}`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("missing %s in: %s", want, s)
+		}
+	}
+	if gjson.GetBytes(out, "safeguards.0.classifier_context|@keys").Raw != gjson.GetBytes(in, "safeguards.0.classifier_context|@keys").Raw {
+		t.Fatalf("classifier_context key order changed: %s", s)
+	}
+
+	// Response bodies never carry the field, but the walk is shared, so a
+	// body without it must come out exactly as before.
+	plain := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+	if out, err := Tokenize(plain, func(s string) (string, error) { return s, nil }); err != nil || string(out) != string(plain) {
+		t.Fatalf("body without safeguards changed: %s, %v", out, err)
+	}
+}
+
+// TestTokenize_Safeguards_TransformErrorFailsClosed: a scan failure
+// inside safeguards blocks the request like one anywhere else.
+func TestTokenize_Safeguards_TransformErrorFailsClosed(t *testing.T) {
+	in := []byte(`{"messages":[],"safeguards":[{"type":"dangerous_tool_use","classifier_context":{"live_cwd":"/x"}}]}`)
+	boom := errors.New("boom")
+	_, err := Tokenize(in, func(string) (string, error) { return "", boom })
+	if !errors.Is(err, boom) {
+		t.Fatalf("expected the transform error, got: %v", err)
+	}
+}
+
 // TestTokenize_CompactionBlock_NeverTouched: a server-side compaction
 // block is signed, so like a thinking block it must go back
 // byte-for-byte -- even when its summary contains a value a detector
