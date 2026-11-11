@@ -676,6 +676,15 @@ func looksLikeBareFilename(text string, start, end int, parts domainParts) bool 
 // `rules block --domain` entry (checked by the caller). Attribute access
 // without a call ("config.live", "arr.group;") has no "(" and is still
 // tokenized; see TestKnownAmbiguity_CcTLDExtensionCollision.
+//
+// The exemption is then narrowed by what a call chain cannot look like,
+// because the first version let "db01.corp.group(10.0.0.5)" through: a
+// label with a hyphen or a leading digit is not an identifier, and with
+// three or more labels a digit anywhere ("db01.corp.group(") or an IP
+// address as the first thing in the parentheses marks a hostname. What
+// remains ambiguous is a client domain on one of these few TLDs, written
+// with no digits or hyphens directly before "(" ("portal.acme.build(x)"
+// against "self.client.build(x)"); `rules block --domain` covers it.
 func looksLikeMethodCall(text string, start, end int, suffix string) bool {
 	if end >= len(text) || text[end] != '(' {
 		return false
@@ -685,8 +694,27 @@ func looksLikeMethodCall(text string, start, end int, suffix string) bool {
 	}
 	candidate := strings.ToLower(text[start:end])
 	before := strings.ToLower(text[:start])
-	return !strings.HasPrefix(candidate, "www.") && !strings.HasSuffix(before, "://")
+	if strings.HasPrefix(candidate, "www.") || strings.HasSuffix(before, "://") {
+		return false
+	}
+	// A call chain is made of identifiers; a hostname often is not.
+	labels := strings.Split(candidate, ".")
+	hasDigit := false
+	for _, label := range labels {
+		if label == "" || strings.Contains(label, "-") || (label[0] >= '0' && label[0] <= '9') {
+			return false
+		}
+		hasDigit = hasDigit || strings.ContainsAny(label, "0123456789")
+	}
+	if len(labels) >= 3 && (hasDigit || startsWithIPv4Re.MatchString(text[end+1:])) {
+		return false
+	}
+	return true
 }
+
+// startsWithIPv4Re matches text that opens with a dotted-quad address,
+// as in the "(10.0.0.5)" a tool prints after a hostname.
+var startsWithIPv4Re = regexp.MustCompile(`^\s*\d{1,3}(?:\.\d{1,3}){3}\b`)
 
 // methodNameTLDs are real TLDs that are also everyday method names in
 // Python/JS/Go ("datetime.now()", "date.today()", "subprocess.run()",
@@ -1139,7 +1167,8 @@ var basicAuthRe = regexp.MustCompile(`\b(?i:basic)[ \t]+([A-Za-z0-9+/]{4,}={0,2}
 // authentication is enabled") fail this, so the detector never fires on
 // prose.
 func isBasicCredential(b64 string) bool {
-	raw, err := base64.StdEncoding.DecodeString(b64)
+	// Padding is optional in practice: some clients strip the "=".
+	raw, err := base64.RawStdEncoding.DecodeString(strings.TrimRight(b64, "="))
 	if err != nil || !utf8.Valid(raw) || !bytes.ContainsRune(raw, ':') {
 		return false
 	}
@@ -1377,6 +1406,9 @@ var gppCPasswordDetector = capturedMatchDetector{gppCPasswordRe, tokenstore.Enti
 // camelCase "dbPassword"), optionally quoted (JSON, YAML), then ":", "="
 // or "=>". "pass" counts only with a prefix ("DB_PASS", "dbPass"): on its
 // own it is an ordinary English word ("first pass: ...").
+// Run-together names in one case count too ("PGPASSWORD", "MYSQL_PWD",
+// "rootpassword"), since that is how the common environment variables
+// are spelled.
 //
 // Requiring the separator right after the key is what keeps prose out:
 // "the password is weak", "[sudo] password for kali:", and keys that
@@ -1385,7 +1417,7 @@ var gppCPasswordDetector = capturedMatchDetector{gppCPasswordRe, tokenstore.Enti
 // the only signal there is; this is the same keyword-anchoring as
 // bareCredentialKeywordRe, minus that detector's 20+ char / digit value
 // rule, which a human-chosen password ("Example@123") would never meet.
-var passwordKeyRe = regexp.MustCompile(`(?:^|[^A-Za-z0-9])(?:(?:[A-Za-z0-9]+[_-])*(?i:password|passwd|passphrase|pwd)|(?:[A-Za-z0-9]+[_-])+(?i:pass)|[a-z0-9]+(?:Password|Passwd|Passphrase|Pwd|Pass))["']?[ \t]*(?:=>|[:=])[ \t]*`)
+var passwordKeyRe = regexp.MustCompile(`(?:^|[^A-Za-z0-9])(?:(?:[A-Za-z0-9]+[_-])*(?i:password|passwd|passphrase|pwd)|(?:[A-Za-z0-9]+[_-])+(?i:pass)|[a-z0-9]+(?:Password|Passwd|Passphrase|Pwd|Pass)|[A-Z0-9]+(?:PASSWORD|PASSWD|PWD)|[a-z0-9]+(?:password|passwd))["']?[ \t]*(?:=>|[:=])[ \t]*`)
 
 // passwordNonValues are values that sit next to a password key without
 // being a password: schema/type names (an OpenAPI example's
