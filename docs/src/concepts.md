@@ -155,7 +155,10 @@ Deliberately not scanned:
   [Known gaps](./security/gaps.md#pdfs-images-and-other-files-claude-reads-whole).
 
 A body is scanned whenever it is JSON, whatever its `Content-Type`
-header says; one that starts like JSON but is malformed is blocked.
+header says; one that starts like JSON but is malformed is blocked. A
+gzip-compressed body is decompressed, scanned and forwarded
+uncompressed. Any other `Content-Encoding` is refused with a `415`,
+because a body the proxy cannot read is one it cannot redact.
 
 Message Batches are covered as well, for other clients you point at the
 proxy (Claude Code does not use them): each entry of a create-batch body

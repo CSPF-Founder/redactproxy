@@ -3,6 +3,7 @@ package proxyserver
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -339,6 +340,82 @@ func TestProxy_MessageBatches_TokenizedOutDetokenizedBack(t *testing.T) {
 	lines := strings.Split(strings.TrimSpace(string(results)), "\n")
 	if len(lines) != 2 || !strings.Contains(lines[0], "done: scan widgetcorp-fixture.com") || !strings.Contains(lines[1], "done: ping 10.20.30.40") {
 		t.Fatalf("batch results not detokenized line by line: %s", results)
+	}
+}
+
+// TestProxy_CompressedRequestBody: a gzip request body is decompressed,
+// scanned and forwarded uncompressed, whatever its Content-Type; a
+// coding the proxy cannot read, a corrupt gzip body and one that expands
+// past the size limit are all blocked before the upstream.
+func TestProxy_CompressedRequestBody(t *testing.T) {
+	var captured []byte
+	var capturedEncoding string
+	hits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		captured, _ = io.ReadAll(r.Body)
+		capturedEncoding = r.Header.Get("Content-Encoding")
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"type":"message","role":"assistant","content":[]}`)
+	}))
+	defer upstream.Close()
+	upstreamURL, _ := url.Parse(upstream.URL)
+	store, err := tokenstore.Open(filepath.Join(t.TempDir(), "tokens.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	ts := httptest.NewServer(New(Config{Upstream: upstreamURL, Engine: redact.New(store, redact.DefaultDetectors()...), MaxBodyBytes: 4096}))
+	defer ts.Close()
+
+	gz := func(s string) []byte {
+		var buf bytes.Buffer
+		zw := gzip.NewWriter(&buf)
+		zw.Write([]byte(s))
+		zw.Close()
+		return buf.Bytes()
+	}
+	post := func(contentType, encoding string, body []byte) int {
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/messages", bytes.NewReader(body))
+		req.Header.Set("Content-Type", contentType)
+		req.Header.Set("Content-Encoding", encoding)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	body := `{"model":"m","messages":[{"role":"user","content":"check widgetcorp-fixture.com"}]}`
+
+	for _, ct := range []string{"application/json", "text/plain"} {
+		for _, enc := range []string{"gzip", "GZIP", "x-gzip"} {
+			if code := post(ct, enc, gz(body)); code != http.StatusOK {
+				t.Fatalf("%s/%s: status %d", ct, enc, code)
+			}
+			if !gjson.ValidBytes(captured) || capturedEncoding != "" {
+				t.Fatalf("%s/%s: expected plain JSON upstream with no Content-Encoding, got encoding %q body %q", ct, enc, capturedEncoding, captured)
+			}
+			if strings.Contains(string(captured), "widgetcorp-fixture.com") || !strings.Contains(string(captured), "tok") {
+				t.Fatalf("%s/%s: body not tokenized: %s", ct, enc, captured)
+			}
+		}
+	}
+
+	blocked := map[string]struct {
+		encoding string
+		body     []byte
+	}{
+		"unsupported coding":     {"zstd", []byte(body)},
+		"stacked codings":        {"gzip, br", gz(body)},
+		"corrupt gzip":           {"gzip", []byte(body)},
+		"expands past the limit": {"gzip", gz(`{"messages":[{"role":"user","content":"` + strings.Repeat("a", 8192) + `"}]}`)},
+	}
+	for name, tc := range blocked {
+		before := hits
+		if code := post("application/json", tc.encoding, tc.body); code != http.StatusUnsupportedMediaType || hits != before {
+			t.Fatalf("%s: expected 415 before upstream, got status %d, upstream hits %d->%d", name, code, before, hits)
+		}
 	}
 }
 

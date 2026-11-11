@@ -9,6 +9,7 @@ package proxyserver
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -173,6 +174,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A compressed body is opaque to everything below, and the upstream
+	// would decompress it and read real values the scan never saw.
+	reqBody, err = s.decodeRequestBody(r, reqBody)
+	if err != nil {
+		s.logger.Error("decode request body; blocking request", "err", err, "path", r.URL.Path)
+		writeAPIError(w, http.StatusUnsupportedMediaType, "invalid_request_error", "blocked by the local proxy: "+err.Error())
+		return
+	}
+
 	outBody := reqBody
 	// Scanned on what the body looks like, not only on what the header
 	// claims: a JSON body sent as "text/plain" or with no Content-Type at
@@ -294,6 +304,39 @@ func normalizeHost(hostport string) string {
 		host = host[:i]
 	}
 	return strings.ToLower(strings.TrimSuffix(host, "."))
+}
+
+// decodeRequestBody undoes the request's Content-Encoding so the body
+// can be scanned, and drops the header: the body is then forwarded
+// uncompressed. Claude Code gzips large requests it sends straight to
+// api.anthropic.com, though not ones sent to a custom base URL today.
+//
+// gzip is the only coding handled. Any other one is refused, because a
+// body this proxy cannot read is one it cannot redact. The decompressed
+// size is held to the same limit as an uncompressed body, so a small
+// compressed request cannot expand without bound.
+func (s *Server) decodeRequestBody(r *http.Request, body []byte) ([]byte, error) {
+	encoding := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Encoding")))
+	switch encoding {
+	case "", "identity":
+		return body, nil
+	case "gzip", "x-gzip":
+		zr, err := gzip.NewReader(bytes.NewReader(body))
+		if err != nil {
+			return nil, fmt.Errorf("request body is not valid gzip: %w", err)
+		}
+		decoded, err := io.ReadAll(io.LimitReader(zr, s.maxBodyBytes+1))
+		if err != nil {
+			return nil, fmt.Errorf("request body is not valid gzip: %w", err)
+		}
+		if int64(len(decoded)) > s.maxBodyBytes {
+			return nil, fmt.Errorf("decompressed request body exceeds the proxy's size limit")
+		}
+		r.Header.Del("Content-Encoding")
+		return decoded, nil
+	default:
+		return nil, fmt.Errorf("request Content-Encoding %q cannot be scanned; send the body uncompressed or as gzip", encoding)
+	}
 }
 
 func (s *Server) buildUpstreamRequest(r *http.Request, body []byte) (*http.Request, error) {
