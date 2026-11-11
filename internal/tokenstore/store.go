@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -198,6 +199,9 @@ type Store struct {
 	mu         sync.RWMutex
 	real2token map[string]string
 	token2real map[string]string
+
+	// deletes counts successful Delete calls; see DeleteCount.
+	deletes atomic.Uint64
 
 	// spanTrie backs RegisterSpan/SafeFlushPoint/AlreadyTokenizedSpans
 	// (see spans.go) and carries its own lock, deliberately separate
@@ -428,5 +432,16 @@ func (s *Store) Delete(real string) (bool, error) {
 
 	delete(s.real2token, real)
 	delete(s.token2real, token)
+	s.deletes.Add(1)
 	return true, nil
+}
+
+// DeleteCount reports how many mappings have been deleted from this
+// store since it was opened. It only ever grows. Anything that caches
+// tokenized text has to treat a change here as invalidating its cache: a
+// cached output can still contain the deleted token, which no longer
+// detokenizes, so the model's reply would reach the operator with a
+// placeholder in it.
+func (s *Store) DeleteCount() uint64 {
+	return s.deletes.Load()
 }

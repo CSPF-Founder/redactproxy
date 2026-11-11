@@ -139,7 +139,13 @@ func (e *Engine) Tokenize(text string) (string, error) {
 	// result look stale to LATER lookups (a wasted cache slot, safe),
 	// never cause it to be miscategorized as valid for a generation it
 	// wasn't actually computed under (unsafe).
-	gen := e.gen.Load()
+	//
+	// The store's delete count is folded in for the same reason: after
+	// `tokens remove` (the running proxy's console does this live) a
+	// cached output can hold a token whose mapping is gone. Both counters
+	// only grow, so their sum identifies a configuration-and-store state
+	// no earlier entry can share.
+	gen := e.gen.Load() + e.store.DeleteCount()
 	if cached, ok := e.cache.get(text, gen); ok {
 		return cached, nil
 	}

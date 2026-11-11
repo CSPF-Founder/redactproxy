@@ -351,3 +351,29 @@ func TestTokenize_NoFalsePositiveOnPlainProse(t *testing.T) {
 		t.Fatalf("plain prose with no PII was modified: %q", out)
 	}
 }
+
+// TestEngine_TokenRemoval_InvalidatesTokenizeCache: removing a mapping
+// (the live console's `remove`) must not leave the old token being
+// served from the tokenize cache. That token no longer detokenizes, so
+// a reply echoing it would reach the operator unrestored.
+func TestEngine_TokenRemoval_InvalidatesTokenizeCache(t *testing.T) {
+	e, store := newTestEngine(t)
+	const in = "scan widgetcorp-fixture.com now"
+	first, err := e.Tokenize(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := store.Delete("widgetcorp-fixture.com"); err != nil || !removed {
+		t.Fatalf("delete: removed=%v err=%v", removed, err)
+	}
+	second, err := e.Tokenize(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second == first {
+		t.Fatalf("stale cached output served after the mapping was removed: %q", second)
+	}
+	if got := e.Detokenize(second); got != in {
+		t.Fatalf("output after removal does not round-trip: %q -> %q", second, got)
+	}
+}
