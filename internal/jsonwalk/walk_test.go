@@ -437,9 +437,10 @@ func TestTokenize_TopLevelToolReference_FailsClosed(t *testing.T) {
 // disconnects mid-session: tool_removal / tool_addition blocks naming a
 // tool by reference or (additions only) by full definition. Like
 // tool_reference above, these used to fail closed as unrecognized and
-// block the rest of the session. They must pass through byte-for-byte,
-// definition included (the same data tools[] carries, never walked),
-// while a text block in the same message is still scanned.
+// block the rest of the session. References pass through byte-for-byte;
+// an MCP tool's inline definition has only its description text scanned
+// (see TestTokenize_ToolAddition_MCPDefinitionScanned), like its entry
+// in tools[]; a text block in the same message is scanned as usual.
 func TestTokenize_MidConversationToolChanges_PassThrough(t *testing.T) {
 	removal := `{"type":"tool_removal","tool":{"type":"tool_reference","name":"mcp__old__query"}}`
 	byRef := `{"type":"tool_addition","tool":{"type":"tool_reference","name":"mcp__internal-db__query"}}`
@@ -450,9 +451,10 @@ func TestTokenize_MidConversationToolChanges_PassThrough(t *testing.T) {
 		t.Fatalf("expected tool_addition/tool_removal blocks to be accepted, got: %v", err)
 	}
 	s := mustPretty(t, out)
-	for _, block := range []string{removal, byRef, byValue} {
+	byValueScanned := strings.Replace(byValue, `"description":"Look up a host"`, `"description":"TOK:Look up a host"`, 1)
+	for _, block := range []string{removal, byRef, byValueScanned} {
 		if !strings.Contains(s, block) {
-			t.Fatalf("tool change block must pass through byte-for-byte, missing %s in: %s", block, s)
+			t.Fatalf("tool change block changed beyond a definition's description, missing %s in: %s", block, s)
 		}
 	}
 	if !strings.Contains(s, `"text":"TOK:MCP server for real-target.example reconnected"`) {
@@ -608,6 +610,61 @@ func TestTokenize_SearchResult_UnexpectedShape_FailsClosed(t *testing.T) {
 				t.Fatalf("expected the error to name the block type, got: %v", err)
 			}
 		})
+	}
+}
+
+// TestTokenize_MCPToolDefinitions_TextScanned: an MCP server's tool
+// description and the free text in its input schema are operator-written
+// and must be scanned, while everything structural -- and every built-in
+// tool -- is left exactly as sent.
+func TestTokenize_MCPToolDefinitions_TextScanned(t *testing.T) {
+	builtin := `{"name":"Artifact","description":"loads scripts only from cdn.real-target.example","input_schema":{"type":"object","properties":{"url":{"type":"string","description":"a real-target.example link"}}}}`
+	server := `{"type":"web_search_20250305","name":"web_search","allowed_domains":["real-target.example"]}`
+	mcp := `{"name":"mcp__db__query","description":"Query db01.real-target.example","input_schema":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","title":"real-target.example query","properties":{"description":{"type":"string","description":"free text about real-target.example","default":"real-target.example","pattern":"^real-target\\.example$"},"env":{"type":"string","enum":["prod.real-target.example","staging"],"examples":[{"host":"a.real-target.example"}]},"rows":{"type":"array","items":{"type":"object","properties":{"host":{"const":"b.real-target.example","format":"hostname"}}}},"mode":{"anyOf":[{"type":"string","description":"c.real-target.example"},{"type":"null"}]}},"required":["description","env"],"additionalProperties":false},"defer_loading":true,"cache_control":{"type":"ephemeral"}}`
+	in := []byte(`{"model":"m","tools":[` + builtin + `,` + server + `,` + mcp + `],"messages":[]}`)
+	out, err := Tokenize(in, markTransform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := mustPretty(t, out)
+	for _, want := range []string{
+		builtin,
+		server,
+		`"name":"mcp__db__query","description":"TOK:Query db01.real-target.example"`,
+		`"$schema":"https://json-schema.org/draft/2020-12/schema"`,
+		`"title":"TOK:real-target.example query"`,
+		`"properties":{"description":{"type":"string","description":"TOK:free text about real-target.example","default":"TOK:real-target.example","pattern":"^real-target\\.example$"}`,
+		`"enum":["TOK:prod.real-target.example","TOK:staging"]`,
+		`"examples":[{"host":"TOK:a.real-target.example"}]`,
+		`"const":"TOK:b.real-target.example","format":"hostname"`,
+		`"anyOf":[{"type":"string","description":"TOK:c.real-target.example"},{"type":"null"}]`,
+		`"required":["description","env"],"additionalProperties":false`,
+		`"defer_loading":true,"cache_control":{"type":"ephemeral"}`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("missing %s in: %s", want, s)
+		}
+	}
+}
+
+// TestTokenize_ToolAddition_MCPDefinitionScanned: an MCP tool defined
+// mid-conversation carries the same text as one in "tools", and gets the
+// same scan; a built-in tool's definition does not.
+func TestTokenize_ToolAddition_MCPDefinitionScanned(t *testing.T) {
+	block := func(name string) string {
+		return `{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"name":"` + name + `","description":"Ping gw.real-target.example","input_schema":{"type":"object","properties":{"host":{"type":"string","default":"gw.real-target.example"}}}}}}`
+	}
+	in := []byte(`{"messages":[{"role":"user","content":[` + block("mcp__net__ping") + `,` + block("Ping") + `]}]}`)
+	out, err := Tokenize(in, markTransform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := mustPretty(t, out)
+	if !strings.Contains(s, `"name":"mcp__net__ping","description":"TOK:Ping gw.real-target.example","input_schema":{"type":"object","properties":{"host":{"type":"string","default":"TOK:gw.real-target.example"}}}`) {
+		t.Fatalf("MCP tool_definition not scanned: %s", s)
+	}
+	if !strings.Contains(s, block("Ping")) {
+		t.Fatalf("built-in tool_definition must pass through unchanged: %s", s)
 	}
 }
 

@@ -638,6 +638,13 @@ func collectPaths(raw []byte) (paths []string, inputPaths []string, unknownType 
 		})
 	}
 
+	if tools := root.Get("tools"); tools.IsArray() {
+		tools.ForEach(func(ti, tool gjson.Result) bool {
+			collectMCPToolPaths(tool, fmt.Sprintf("tools.%d", ti.Int()), &paths)
+			return true
+		})
+	}
+
 	if sg := root.Get("safeguards"); sg.Exists() {
 		collectSafeguardStrings(sg, "safeguards", &paths)
 	}
@@ -727,9 +734,14 @@ func collectBlockArrayPaths(blocks gjson.Result, basePath string, paths *[]strin
 		case "tool_use", "mcp_tool_use":
 			*inputPaths = append(*inputPaths, blockBase+".input")
 		case "tool_addition", "tool_removal":
-			// Nothing to redact; see toolChangeProblem.
-			if p := toolChangeProblem(block); p != "" && unknownType == "" {
-				unknownType = fmt.Sprintf("%s (%s)", typ, p)
+			// Only an MCP tool's inline definition has anything to
+			// redact; see toolChangeProblem and collectMCPToolPaths.
+			if p := toolChangeProblem(block); p != "" {
+				if unknownType == "" {
+					unknownType = fmt.Sprintf("%s (%s)", typ, p)
+				}
+			} else if def := block.Get("tool.definition"); def.IsObject() {
+				collectMCPToolPaths(def, blockBase+".tool.definition", paths)
 			}
 		case "fallback":
 			// Nothing to redact; see fallbackProblem.
@@ -965,6 +977,91 @@ func collectLeafStrings(v gjson.Result, path string, out *[]string) {
 			return true
 		})
 	}
+}
+
+// mcpToolNamePrefix is how Claude Code names every tool that comes from
+// an MCP server: "mcp__<server>__<tool>".
+const mcpToolNamePrefix = "mcp__"
+
+// collectMCPToolPaths finds the operator-authored text in one tool
+// definition, if it belongs to an MCP server: its description, and the
+// descriptive strings in its input schema (see collectSchemaPaths).
+//
+// Only MCP tools, on purpose. The built-in tools' definitions are the
+// harness's own fixed text, the same kind of content as the top-level
+// "system" field and left alone for the same reason: they name CDNs and
+// claude.ai URLs the model has to read as written. An MCP server is
+// local infrastructure the operator runs, and a description such as
+// "Query the billing DB at db01.client.example" is client data that used
+// to go out with every request. Tokenizing it is stable from request to
+// request, like everything else here, so it does not disturb the prompt
+// cache the tool list sits at the front of.
+//
+// The tool's name is never touched: it is the identifier tool_use blocks
+// refer back to, and the API restricts its characters.
+func collectMCPToolPaths(tool gjson.Result, base string, paths *[]string) {
+	if !strings.HasPrefix(tool.Get("name").String(), mcpToolNamePrefix) {
+		return
+	}
+	if tool.Get("description").Type == gjson.String {
+		*paths = append(*paths, base+".description")
+	}
+	collectSchemaPaths(tool.Get("input_schema"), base+".input_schema", paths)
+}
+
+// collectSchemaPaths walks a JSON Schema and collects the strings that
+// are free text or sample data: description and title, and every string
+// under default, const, enum and examples. Everything structural is left
+// alone -- property names, required, type, format, pattern, $ref -- so
+// the schema still validates the same inputs. A tokenized enum or
+// default stays consistent end to end: the model answers with the token,
+// and the response path restores the real value before the tool runs.
+//
+// It has to follow the schema's own structure instead of matching key
+// names anywhere, because a property can itself be called "description"
+// or "default".
+func collectSchemaPaths(schema gjson.Result, path string, paths *[]string) {
+	if !schema.IsObject() {
+		return
+	}
+	each := func(v gjson.Result, base string) {
+		i := 0
+		v.ForEach(func(key, child gjson.Result) bool {
+			if v.IsArray() {
+				collectSchemaPaths(child, fmt.Sprintf("%s.%d", base, i), paths)
+				i++
+			} else {
+				collectSchemaPaths(child, base+"."+escapeGJSONKey(key.String()), paths)
+			}
+			return true
+		})
+	}
+	schema.ForEach(func(key, val gjson.Result) bool {
+		k := key.String()
+		sub := path + "." + escapeGJSONKey(k)
+		switch k {
+		case "description", "title":
+			if val.Type == gjson.String {
+				*paths = append(*paths, sub)
+			}
+		case "default", "const", "enum", "examples":
+			collectLeafStrings(val, sub, paths)
+		case "properties", "patternProperties", "$defs", "definitions", "dependentSchemas",
+			"anyOf", "oneOf", "allOf", "prefixItems":
+			// A map of name -> schema, or a list of schemas.
+			if val.IsObject() || val.IsArray() {
+				each(val, sub)
+			}
+		case "items", "additionalProperties", "not", "if", "then", "else", "contains", "propertyNames":
+			// One schema ("items" may also be a list in older drafts).
+			if val.IsArray() {
+				each(val, sub)
+			} else {
+				collectSchemaPaths(val, sub, paths)
+			}
+		}
+		return true
+	})
 }
 
 // safeguardProtocolKeys are the keys under "safeguards" whose values
