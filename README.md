@@ -323,6 +323,12 @@ refused.
 Detection is regex-based and only ever sees request and response
 bodies. Known gaps:
 
+- PDFs and images. Claude Code sends them to the API as files, and the
+  proxy can't redact inside one. Extract the text locally and have
+  Claude read that.
+- Custom agent prompts, output styles and `--append-system-prompt`.
+  They travel in the `system` field, which is never scanned, so keep
+  client details out of them.
 - Encoded data. A `.env` piped through `base64`, an `xxd` dump,
   Terraform state: all of it goes straight through. Decode it locally
   and look first.

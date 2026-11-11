@@ -136,10 +136,11 @@ come back in `safeguard_results`, which the proxy returns unchanged.
 
 Deliberately not scanned:
 
-- The top-level `system` field. It is Claude Code's own prompt
-  boilerplate, and the folder-name leak in
-  [Known gaps](./security/gaps.md) comes from the project-memory
-  directory name it carries.
+- The top-level `system` field. It is mostly Claude Code's own prompt
+  boilerplate, but it also carries the project-memory directory name
+  behind the folder-name leak, and any system-prompt text of your own,
+  such as a custom agent's prompt. See
+  [Known gaps](./security/gaps.md).
 - `thinking` and `redacted_thinking` blocks. The text and its signature
   together are a cryptographic proof the API validates on replay, so any
   edit makes the next request fail.
@@ -149,7 +150,9 @@ Deliberately not scanned:
 - Server-side `compaction` blocks. Like thinking, the summary is signed
   and must go back byte-for-byte, and it was written from the already
   redacted conversation.
-- Images and documents, which are binary payloads rather than text.
+- Images and documents such as PDFs, which are binary payloads rather
+  than text. A file Claude reads this way goes out whole; see
+  [Known gaps](./security/gaps.md#pdfs-images-and-other-files-claude-reads-whole).
 
 A body is scanned whenever it is JSON, whatever its `Content-Type`
 header says; one that starts like JSON but is malformed is blocked.

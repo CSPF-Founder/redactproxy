@@ -66,6 +66,33 @@ decoded content gets a normal pass through redaction instead of arriving
 unprotected in Claude's own output. See
 [Configuring Claude Code](../claude-code.md#the-claudemd-note).
 
+## PDFs, images and other files Claude reads whole
+
+When Claude Code reads a PDF or an image, it sends the file itself to
+the API as a binary attachment. The proxy cannot redact inside one:
+there is no safe way to rewrite text in a PDF, and none at all in a
+picture. A client report, a scanned contract or a screenshot of an
+admin panel goes out exactly as it is on disk.
+
+Don't have Claude read client PDFs or screenshots directly. Extract the
+text locally first (`pdftotext report.pdf report.txt`) and have Claude
+read the text file, which gets a normal pass through redaction.
+
+## Custom agent prompts and other system-prompt text
+
+The `system` field is never scanned, and it is not only Claude Code's
+own text. Anything you add to the system prompt travels in it as you
+wrote it:
+
+- the body of a custom agent file (`.claude/agents/<name>.md`), which
+  becomes the system prompt of every request that agent makes;
+- an output style;
+- `--system-prompt` and `--append-system-prompt`.
+
+Keep client names, hosts and addresses out of all of these. Put
+engagement details in `CLAUDE.md` or in the conversation, which are
+scanned.
+
 ## Names and prose
 
 Only recognizable shapes get detected. Client names, trading names,
