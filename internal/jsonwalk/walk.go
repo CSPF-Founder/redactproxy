@@ -161,8 +161,15 @@ const environmentContextPrefix = "As you answer the user's questions, you can us
 // section here is far more likely to be another fact like userEmail
 // than a second source of real file content -- protecting by default is
 // the better call specifically within this one wrapper.
+//
+// gitStatus is the snapshot Claude Code takes at the start of a
+// conversation: current branch, git user, changed files and recent
+// commit subjects. On an engagement those name the client as readily as
+// CLAUDE.md does ("acme-bank.com-pentest", "Add notes for the 10.1.2.3
+// portal test"), and the section went out unscanned on every request.
 var scannableContextSections = map[string]bool{
-	"claudeMd": true,
+	"claudeMd":  true,
+	"gitStatus": true,
 }
 
 var contextSectionHeaderRe = regexp.MustCompile(`(?m)^# (\S+)\n`)

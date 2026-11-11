@@ -708,6 +708,39 @@ func TestDetokenize_BatchResultLine(t *testing.T) {
 	}
 }
 
+// TestTokenize_EnvironmentContext_GitStatusScanned: the gitStatus
+// section (branch, git user, changed files, recent commit subjects) is
+// scanned, while the userEmail section before it and the fixed trailer
+// after it reach the transform as part of nothing: they stay byte for
+// byte as sent.
+func TestTokenize_EnvironmentContext_GitStatusScanned(t *testing.T) {
+	email := "# userEmail\nThe user's email address is operator@internal-harness.example.\n"
+	git := "# gitStatus\nCurrent branch: real-target.example-pentest\n\nRecent commits:\n0029d87 Notes for 10.20.30.45\n"
+	in, _ := json.Marshal(map[string]any{"messages": []map[string]any{{"role": "user", "content": []map[string]any{
+		{"type": "text", "text": "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n" + email + git + "</system-reminder>\n"},
+	}}}})
+	var scanned []string
+	out, err := Tokenize(in, func(s string) (string, error) {
+		scanned = append(scanned, s)
+		return strings.ReplaceAll(s, "real-target.example", "TOK"), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := gjson.GetBytes(out, "messages.0.content.0.text").String()
+	if !strings.Contains(text, "Current branch: TOK-pentest") {
+		t.Fatalf("gitStatus section not scanned: %q", text)
+	}
+	if !strings.Contains(text, email) {
+		t.Fatalf("userEmail section changed: %q", text)
+	}
+	for _, s := range scanned {
+		if strings.Contains(s, "operator@internal-harness.example") {
+			t.Fatalf("userEmail section reached the transform: %q", s)
+		}
+	}
+}
+
 // TestTokenize_Safeguards_ContextScanned: auto mode's "safeguards"
 // field repeats the working directory, git remote and permission rules
 // the conversation already carries tokenized; every string in it must be
