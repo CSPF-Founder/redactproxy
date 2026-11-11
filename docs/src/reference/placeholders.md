@@ -18,7 +18,7 @@ with and does not identify anyone.
 |---|---|---|
 | Domain | `tok<16 hex>.<real suffix>` | the real public suffix, and any subdomain |
 | Email | `user-<12 hex>@<domain token>` | the shape, and which org the domain belongs to |
-| IPv4 | `198.18.<n>.<real host octet>` | the host octet, so hosts stay distinguishable |
+| IPv4 | `198.18.<n>.<real host octet>`; then `198.19.<n>.…` and `240.<a>.<b>.…` | the host octet, so hosts stay distinguishable |
 | IPv6 | `fd00:c0de:<32 bits>:<real interface ID>` | the 64-bit interface ID |
 | NANP phone | `<area code>-555-01<2 digits>` | that it is a NANP number |
 | International phone | `<real country code> 555-<4 digits>` | the real country calling code |
@@ -42,7 +42,15 @@ relationships between hosts without ever seeing whose they are.
   used deliberately *instead* of an RFC 1918 range, because internal
   engagements routinely target real `10.x`, `172.16-31.x` and
   `192.168.x` addresses, and the token space must not overlap real
-  targets.
+  targets. The first 256 networks of an engagement use `198.18.x`, the
+  next 256 use `198.19.x`.
+- **`240.0.0.0/8`** is part of the reserved "class E" block, which is
+  never routed and not assigned to hosts. It is used only once both
+  halves of `198.18.0.0/15` are full, as `240.<a>.<b>.<host>`.
+
+An address that is already inside one of these ranges is never redacted,
+because it cannot be told apart from a placeholder. That is harmless for
+`198.18.0.0/15` and for `240.0.0.0/8`, which real targets do not use.
 - **`fd00::/8`** is RFC 4193 Unique Local Address space, never a real
   global address.
 - **`555-01XX`** is the NANP exchange reserved for fictional use under
@@ -151,10 +159,11 @@ rather than at reasoning around the token.
 Two placeholder spaces are counter-allocated rather than random, and one
 of them is finite:
 
-- **IPv4 networks: 256 per engagement.** Each distinct real /24 gets
-  one. An engagement touching more than 256 distinct /24 networks would
-  be unusual, but if it happens the request that hits the 257th fails
-  closed rather than reusing a placeholder.
+- **IPv4 networks: 66,048 per engagement.** Each distinct real /24 gets
+  one: 512 in `198.18.0.0/15`, then 65,536 in `240.0.0.0/8`. That covers
+  a sweep of a whole /16 with room to spare. Slots are not reused, so
+  `tokens remove` does not free one, and a request that needs a network
+  past the last slot fails closed rather than reusing a placeholder.
 - **IPv6 networks: about 4.3 billion per engagement.** No realistic
   exhaustion risk.
 
