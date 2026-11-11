@@ -313,6 +313,11 @@ it and get this engagement's real values back. Use it only on a network
 you fully control, firewall the port to the one machine that needs it,
 and stop the proxy when you are done.
 
+If that machine reaches the proxy by DNS name rather than by IP address,
+also list the name with `--allow-host`, for example
+`--allow-host buildbox.lan`. Requests addressed to any other name are
+refused.
+
 ## What this doesn't protect
 
 Detection is regex-based and only ever sees request and response

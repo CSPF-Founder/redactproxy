@@ -100,6 +100,23 @@ If a real value reaches the model some other way, the model can restate
 it in a thinking block, and that restatement is permanent for the life
 of the conversation. **Start a new conversation** if that happens.
 
+## Parts of the request that are not scanned
+
+Besides `system`, these fields go to the API as sent:
+
+- **MCP server and tool names.** A tool is named
+  `mcp__<server>__<tool>`, and the name is an identifier the API
+  matches on, so it cannot be rewritten. Don't name an MCP server after
+  the client. The tool's description and schema text are scanned.
+- **Built-in tool definitions.** They are Claude Code's own text.
+- **`mcp_servers`**, the API-side MCP connector: its URLs and
+  authorization tokens. Claude Code's ordinary local MCP servers do not
+  use this field.
+- **`stop_sequences`** and **`metadata`**.
+- **Batch requests** (`/v1/messages/batches`). Their conversations sit
+  under `requests[].params`, which is not walked. Claude Code does not
+  use this endpoint; don't point a batch client at the proxy.
+
 ## HTTP headers
 
 Forwarded verbatim, never inspected. This is what makes credential

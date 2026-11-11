@@ -44,7 +44,10 @@ reaches a third party, not to withhold anything from the operator.
 2. **Loopback is trusted.** By default the proxy binds loopback only and
    refuses to start on any other address, including the bare `:8787`
    shorthand. Any local process that can reach the port can send it
-   traffic. `--allow-non-loopback` lifts the restriction, and with it
+   traffic. A web page in your browser is not such a process: requests
+   whose `Host` is a DNS name you did not list with `--allow-host`, or
+   that carry a foreign `Origin`, are refused, which closes DNS
+   rebinding and cross-origin requests. `--allow-non-loopback` lifts the restriction, and with it
    this assumption: the proxy has no authentication and detokenizes
    every response, so every host that can reach the port is then as
    trusted as a local process. The flag logs a warning for that reason,

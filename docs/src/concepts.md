@@ -151,6 +151,18 @@ Deliberately not scanned:
   redacted conversation.
 - Images and documents, which are binary payloads rather than text.
 
+A body is scanned whenever it is JSON, whatever its `Content-Type`
+header says; one that starts like JSON but is malformed is blocked.
+
+The definitions of MCP tools in the `tools` array are scanned too: the
+tool's description, and the descriptions, titles, defaults, enum values
+and examples in its input schema. An MCP server is yours, and its
+descriptions often name client hosts. Tool names, property names and
+the rest of the schema are left as they are, and the definitions of
+Claude Code's built-in tools are never touched. The redacted text is
+the same on every request, so the prompt cache is not affected, and an
+enum value the model picks is restored before your MCP server sees it.
+
 MCP tool calls and results **are** scanned, unlike the server-executed
 blocks above. What separates them is where the tool runs: web search and
 code execution run on Anthropic's own infrastructure, while an MCP

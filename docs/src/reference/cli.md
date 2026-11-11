@@ -37,6 +37,7 @@ every `rules` and `tokens` subcommand.
 |---|---|---|
 | `--listen` | `127.0.0.1:8787` | address to listen on; loopback only unless `--allow-non-loopback` is given |
 | `--allow-non-loopback` | `false` | allow a non-loopback `--listen`; logs a warning; see below |
+| `--allow-host` | none | comma-separated DNS names clients may use to reach the proxy; see below |
 | `--upstream` | `upstream.txt`, else `https://api.anthropic.com` | the API base URL to proxy to |
 | `--disable` | none | comma-separated categories to disable for this run only |
 | `--debug-level` | `off` | `off`, `new`, `replacements`, `full`; see [Debug logging](../security/debug-logging.md) |
@@ -52,6 +53,14 @@ where asked, and warns at startup and again in its "running" banner: it
 has no authentication, so anyone who can reach the port can read the
 engagement's real values back out of it. See
 [Running Claude Code on another machine](../engagements.md#running-claude-code-on-another-machine).
+
+Every request's `Host` header must be `localhost`, an IP address, or a
+name listed in `--allow-host`; anything else gets a `403`. So does a
+request carrying a web page's `Origin`. This stops a page open in your
+browser from reaching the proxy (DNS rebinding, or a cross-origin
+request). Clients that connect by IP address, loopback or LAN, are not
+affected. Only a client that reaches the proxy by DNS name needs the
+flag, for example `--allow-host buildbox.lan`.
 
 `--upstream` must be absolute and use `http` or `https`. An explicit
 value wins over the engagement's persisted one for that run only.

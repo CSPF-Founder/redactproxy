@@ -229,6 +229,14 @@ the one outcome this project treats as worse than a broken request.
 Check the proxy's output for the specific reason. A body over
 `--max-body-mb` (64 MiB by default) is a common one.
 
+## `403` with `refused by the local proxy`
+
+The request's `Host` header was a DNS name the proxy wasn't told about,
+or the request came from a web page. Point Claude Code at the proxy by
+IP address or `localhost`, or start the proxy with
+`--allow-host <name>` for the name you use. See the
+[CLI reference](./cli.md).
+
 ## `--upstream must be an absolute URL` / `must use http or https`
 
 Caught at startup rather than surfacing later as a generic provider

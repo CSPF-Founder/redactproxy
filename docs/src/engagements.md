@@ -122,6 +122,11 @@ redactproxy --listen 10.0.5.20:8787 --allow-non-loopback
 Then point that machine's Claude Code at it with
 `ANTHROPIC_BASE_URL=http://10.0.5.20:8787`.
 
+If that machine reaches the proxy by DNS name rather than by IP address,
+also list the name with `--allow-host`, for example
+`--allow-host buildbox.lan`. Requests addressed to any other name are
+refused.
+
 The proxy warns at startup, and means it. It has no authentication, and
 every response it returns is detokenized, so anyone who can reach the
 port and has any API key of their own can ask the model to repeat
