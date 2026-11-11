@@ -37,7 +37,7 @@ infrastructure.
 
 Placeholder shapes you'll see (never real data, safe to use verbatim):
 - Domains: ` + "`" + tokenstore.TokenDomainPrefix + "<16 hex>.<real suffix>`" + `, e.g. ` + "`" + tokenstore.TokenDomainPrefix + "1a2b3c4d5e6f7890.com`" + `
-- IPv4: ` + "`" + tokenstore.TokenIPNetworkPrefix + "x.x`" + ` (real host octet kept)
+- IPv4: ` + "`" + tokenstore.TokenIPNetworkPrefix + "x.x`" + ` (real host octet kept); with many networks also ` + "`" + tokenstore.TokenIPNetworkPrefix2 + "x.x`" + ` and ` + "`" + tokenstore.TokenIPNetworkOverflowPrefix + "x.x.x`" + `
 - IPv6: ` + "`" + tokenstore.TokenIPv6NetworkPrefix + "...`" + `
 - Emails: ` + "`" + tokenstore.TokenEmailLocalPrefix + "<hex>@<domain token>`" + `
 - Credentials/API keys: opaque, vendor-prefixed (` + "`" + tokenstore.TokenAWSKeyPrefix + "...`, `" + tokenstore.TokenAWSSecretKeyPrefix + "...`, `" + tokenstore.TokenGitHubPrefix + "...`, `" + tokenstore.TokenBearerPrefix + "...`" + `, etc.)
@@ -56,7 +56,8 @@ to nothing. If you're at all unsure of the exact token, re-read it from
 where it last appeared rather than approximating.
 
 The fake IPv4 addresses (` + "`" + tokenstore.TokenIPNetworkPrefix + "x.x`" + `) come from a real, reserved
-IANA range (RFC 2544 benchmarking space) chosen specifically because
+IANA range (RFC 2544 benchmarking space; ` + "`" + tokenstore.TokenIPNetworkOverflowPrefix + "x.x.x`" + ` is the reserved class E
+block, used once that space runs out) chosen specifically because
 it's never publicly routed, not because the address it stands in for is
 any less real or less sensitive. Treat it exactly like a genuine external
 target IP in your reasoning; don't discount, deprioritize, or treat it as

@@ -737,12 +737,12 @@ func (ipv4Detector) Detect(text string) ([]Detection, error) {
 	var out []Detection
 	for _, loc := range ipv4Re.FindAllStringIndex(text, -1) {
 		val := text[loc[0]:loc[1]]
-		if strings.HasPrefix(val, tokenstore.TokenIPNetworkPrefix) {
-			continue // already a token
-		}
 		addr, err := netip.ParseAddr(val)
 		if err != nil {
 			continue // shouldn't happen given the regex, but never trust a match blindly
+		}
+		if tokenstore.IsIPv4PlaceholderAddr(addr) {
+			continue // already a token, or in a range tokens are minted from
 		}
 		if isReservedIP(addr) {
 			continue // loopback or an RFC 5737 documentation range

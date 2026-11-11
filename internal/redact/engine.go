@@ -768,7 +768,13 @@ var intlPhoneTokenRe = regexp.MustCompile(`\+\d{1,3}-` + regexp.QuoteMeta(tokens
 // host octet's exact width (1-3 digits) is always present in the match
 // itself, unlike the domain case, so no separate lookup-then-lookahead
 // step is needed here.
-var ipNetworkTokenRe = regexp.MustCompile(regexp.QuoteMeta(tokenstore.TokenIPNetworkPrefix) + `(\d{1,3})\.(\d{1,3})\b`)
+//
+// Group 1 is the network token as stored, in any of its three ranges
+// (see tokenstore.ipNetworkToken): "198.18.<n>", "198.19.<n>" or
+// "240.<a>.<b>". Group 2 is the host octet.
+var ipNetworkTokenRe = regexp.MustCompile(`\b((?:` +
+	regexp.QuoteMeta(tokenstore.TokenIPNetworkPrefix) + `|` + regexp.QuoteMeta(tokenstore.TokenIPNetworkPrefix2) + `)\d{1,3}|` +
+	regexp.QuoteMeta(tokenstore.TokenIPNetworkOverflowPrefix) + `\d{1,3}\.\d{1,3})\.(\d{1,3})\b`)
 
 // ipv6TokenCandidateRe finds anything starting with the fixed IPv6 token
 // prefix and greedily consumes the rest of a plausible address. Unlike
@@ -846,7 +852,7 @@ func (e *Engine) detokenizeEmailLocalTokens(text string, dbg *debuglog.Logger) s
 func (e *Engine) detokenizeIPv4Tokens(text string, dbg *debuglog.Logger) string {
 	return ipNetworkTokenRe.ReplaceAllStringFunc(text, func(m string) string {
 		sub := ipNetworkTokenRe.FindStringSubmatch(m)
-		netToken := tokenstore.TokenIPNetworkPrefix + sub[1]
+		netToken := sub[1]
 		if realNet, ok := e.store.LookupReal(netToken); ok {
 			real := realNet + "." + sub[2]
 			dbg.Replacement("detokenize", "ip_network", real, m)

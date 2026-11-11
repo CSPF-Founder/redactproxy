@@ -3,6 +3,7 @@ package redact
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -375,5 +376,58 @@ func TestEngine_TokenRemoval_InvalidatesTokenizeCache(t *testing.T) {
 	}
 	if got := e.Detokenize(second); got != in {
 		t.Fatalf("output after removal does not round-trip: %q -> %q", second, got)
+	}
+}
+
+// TestEngine_IPv4Networks_ThreeRangesRoundTrip mints past both range
+// boundaries (network 257 moves to 198.19., network 513 to 240.) and
+// checks an address in each range tokenizes into that range, keeps its
+// host octet, and detokenizes back, including when it is re-sent.
+func TestEngine_IPv4Networks_ThreeRangesRoundTrip(t *testing.T) {
+	e, store := newTestEngine(t)
+	real := func(i int) string { return fmt.Sprintf("10.%d.%d", i/256, i%256) }
+	for i := 0; i < 520; i++ {
+		if _, err := store.GetOrCreateToken(real(i), tokenstore.EntityIPNetwork); err != nil {
+			t.Fatalf("mint #%d: %v", i, err)
+		}
+	}
+	cases := map[int]string{0: "198.18.0.77", 255: "198.18.255.77", 256: "198.19.0.77", 511: "198.19.255.77", 512: "240.0.0.77", 519: "240.0.7.77"}
+	for i, want := range cases {
+		in := "host " + real(i) + ".77 is up"
+		out, err := e.Tokenize(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out != "host "+want+" is up" {
+			t.Errorf("network #%d: got %q, want token %s", i, out, want)
+		}
+		if back := e.Detokenize(out); back != in {
+			t.Errorf("network #%d: %q detokenized to %q", i, out, back)
+		}
+		if again, _ := e.Tokenize(out); again != out {
+			t.Errorf("network #%d: a token was tokenized again: %q -> %q", i, out, again)
+		}
+	}
+}
+
+// TestEngine_IPv4PlaceholderRanges_LeftAlone: an address in a range
+// tokens are minted from is never treated as a real value, and one that
+// matches no minted token passes through detokenize unchanged.
+func TestEngine_IPv4PlaceholderRanges_LeftAlone(t *testing.T) {
+	e, _ := newTestEngine(t)
+	for _, in := range []string{"probe 198.18.9.1", "probe 198.19.200.4", "probe 240.1.2.3", "probe 240.255.255.254"} {
+		out, err := e.Tokenize(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out != in || e.Detokenize(out) != in {
+			t.Errorf("%q: tokenized to %q, detokenized to %q", in, out, e.Detokenize(out))
+		}
+	}
+	// Neighbouring real ranges are still redacted.
+	for _, in := range []string{"probe 198.17.9.1", "probe 198.20.0.4", "probe 239.1.2.3", "probe 241.1.2.3"} {
+		if out, _ := e.Tokenize(in); out == in {
+			t.Errorf("%q: expected a real address just outside the token ranges to be redacted", in)
+		}
 	}
 }

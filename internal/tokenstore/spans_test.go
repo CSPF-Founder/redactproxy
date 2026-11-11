@@ -301,6 +301,11 @@ func TestMintAndRegisterSpan_FailureRollsBackEverything(t *testing.T) {
 	// nanpFakeAreaCodes widened that pool enough that exhausting it here
 	// would be impractically slow; the IP-network pool is still small and
 	// unchanged, so it takes over this role.
+	// The real pool is tens of thousands of slots; shrink it for this
+	// test so exhausting it stays fast.
+	old := maxIPNetworks
+	maxIPNetworks = 256
+	t.Cleanup(func() { maxIPNetworks = old })
 	s := openTemp(t)
 	for i := 0; i < 256; i++ {
 		if _, err := s.GetOrCreateToken(fmt.Sprintf("10.0.%d", i), EntityIPNetwork); err != nil {

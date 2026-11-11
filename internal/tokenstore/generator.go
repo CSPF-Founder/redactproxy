@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"net/netip"
 	"slices"
 	"strings"
 
@@ -40,6 +41,17 @@ const (
 	// living in a range real targets are likely to use, to keep "is this
 	// address real or ours" unambiguous.
 	TokenIPNetworkPrefix = "198.18."
+	// TokenIPNetworkPrefix2 is the second half of the same RFC 2544
+	// block, used for networks 257-512 of an engagement.
+	TokenIPNetworkPrefix2 = "198.19."
+	// TokenIPNetworkOverflowPrefix begins the tokens minted once both
+	// halves of 198.18.0.0/15 are used up: "240." + two octets, e.g.
+	// "240.3.17". 240.0.0.0/4 is the reserved "class E" block, never
+	// routed and not used for real hosts, so like 198.18.0.0/15 it
+	// cannot be mistaken for a target. It is the fallback rather than
+	// the default because tools and readers recognise it less readily
+	// as an ordinary address.
+	TokenIPNetworkOverflowPrefix = "240."
 	// TokenIPv6NetworkPrefix begins every generated IPv6 /64-network
 	// token: "fd00:c0de:" + two hex groups (32 bits), e.g.
 	// "fd00:c0de:1a2b:3c4d"; the last four groups (64-bit interface ID)
@@ -340,22 +352,56 @@ func nextRandom(existingTokens map[string]string, gen func() string) (string, er
 	return "", fmt.Errorf("failed to generate a unique token after 10 attempts")
 }
 
-// nextIPNetwork mints a fake /24-network token: "198.18." + one octet.
-// Real value key (chosen by the caller, redact.ipv4Detector) is the real
-// address's first three octets, so every host in the same real /24
-// shares this same token; only 256 distinct networks per engagement,
-// which comfortably covers realistic scope (an engagement touching
-// hundreds of distinct /24s would be unusual).
+// maxIPNetworks is how many distinct IPv4 /24 networks one engagement
+// can hold: 256 under 198.18., 256 under 198.19., then 65,536 under
+// 240.x.y. A variable only so a test can exhaust the pool without
+// minting tens of thousands of tokens.
+var maxIPNetworks uint32 = 512 + 65536
+
+// ipNetworkToken is the token for the n-th (0-indexed) network minted in
+// an engagement. The order is fixed, so tokens minted before the pool
+// was extended past 198.18. keep their meaning.
+func ipNetworkToken(n uint32) string {
+	switch {
+	case n < 256:
+		return fmt.Sprintf("%s%d", TokenIPNetworkPrefix, n)
+	case n < 512:
+		return fmt.Sprintf("%s%d", TokenIPNetworkPrefix2, n-256)
+	default:
+		n -= 512
+		return fmt.Sprintf("%s%d.%d", TokenIPNetworkOverflowPrefix, n/256, n%256)
+	}
+}
+
+// IsIPv4PlaceholderAddr reports whether addr lies in a range this
+// package mints IPv4 tokens from: 198.18.0.0/15 or 240.0.0.0/8. The
+// detector must leave such an address alone, since it is (or is
+// indistinguishable from) one of this tool's own placeholders.
+func IsIPv4PlaceholderAddr(addr netip.Addr) bool {
+	if !addr.Is4() {
+		return false
+	}
+	b := addr.As4()
+	return (b[0] == 198 && (b[1] == 18 || b[1] == 19)) || b[0] == 240
+}
+
+// nextIPNetwork mints a fake /24-network token; see ipNetworkToken for
+// the three ranges, used in order. Real value key (chosen by the caller,
+// redact.ipv4Detector) is the real address's first three octets, so
+// every host in the same real /24 shares this same token. The first 512
+// networks stay in RFC 2544 space; a sweep of a whole /16 needs more,
+// which is what the 240.x.y range is for. Slots are never reused: the
+// counter only grows, so removing a mapping does not free its token.
 func nextIPNetwork(tx *bolt.Tx, existingTokens map[string]string) (string, error) {
 	b := tx.Bucket(bucketCounters)
 	n, err := incrementCounter(b, counterKeyIPNetwork)
 	if err != nil {
 		return "", err
 	}
-	if n > 256 {
-		return "", fmt.Errorf("exhausted %sXX token network space (256 networks)", TokenIPNetworkPrefix)
+	if n > maxIPNetworks {
+		return "", fmt.Errorf("exhausted the IPv4 network token space (%d networks)", maxIPNetworks)
 	}
-	candidate := fmt.Sprintf("%s%d", TokenIPNetworkPrefix, n-1) // n is 1-indexed; shift to cover 0..255
+	candidate := ipNetworkToken(n - 1) // n is 1-indexed
 	if _, taken := existingTokens[candidate]; taken {
 		return "", fmt.Errorf("token IP network collision on %s (counter desync)", candidate)
 	}
