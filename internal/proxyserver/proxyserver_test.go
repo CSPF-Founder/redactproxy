@@ -230,6 +230,72 @@ func TestProxy_AutoModeSafeguards_TokenizedConsistentlyWithMessages(t *testing.T
 	}
 }
 
+// TestProxy_BrowserOriginRequestsRefused: a request that carries a web
+// page's fingerprints -- a DNS name in Host (rebinding) or a foreign
+// Origin (cross-origin fetch) -- is refused before it reaches the
+// upstream, while every way a real client addresses the proxy, including
+// by LAN IP when it listens on all interfaces, still works.
+func TestProxy_BrowserOriginRequestsRefused(t *testing.T) {
+	hits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"type":"message","role":"assistant","content":[]}`)
+	}))
+	defer upstream.Close()
+	upstreamURL, _ := url.Parse(upstream.URL)
+	store, err := tokenstore.Open(filepath.Join(t.TempDir(), "tokens.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	srv := New(Config{Upstream: upstreamURL, Engine: redact.New(store, redact.DefaultDetectors()...), AllowedHosts: []string{"Buildbox.LAN."}})
+
+	cases := []struct {
+		name, host, origin, fetchSite string
+		wantOK                        bool
+	}{
+		{"loopback IP", "127.0.0.1:8787", "", "", true},
+		{"localhost", "localhost:8787", "", "", true},
+		{"LAN IP", "192.168.0.190:8787", "", "", true},
+		{"IPv6 loopback", "[::1]:8787", "", "", true},
+		{"no port", "127.0.0.1", "", "", true},
+		{"allowed name", "buildbox.lan:8787", "", "", true},
+		{"allowed name, other case", "BUILDBOX.lan:8787", "", "", true},
+		{"same-origin page on the proxy's own address", "127.0.0.1:8787", "http://127.0.0.1:8787", "same-origin", true},
+		{"rebinding: attacker name in Host", "evil.example:8787", "", "", false},
+		{"rebinding with Origin", "evil.example:8787", "http://evil.example:8787", "same-origin", false},
+		{"name that only starts with localhost", "localhost.evil.example:8787", "", "", false},
+		{"cross-origin fetch", "127.0.0.1:8787", "https://evil.example", "", false},
+		{"opaque origin", "127.0.0.1:8787", "null", "", false},
+		{"cross-site without Origin", "127.0.0.1:8787", "", "cross-site", false},
+		{"empty Host", "", "", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			before := hits
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"messages":[]}`))
+			req.Host = tc.host
+			req.Header.Set("Content-Type", "application/json")
+			if tc.origin != "" {
+				req.Header.Set("Origin", tc.origin)
+			}
+			if tc.fetchSite != "" {
+				req.Header.Set("Sec-Fetch-Site", tc.fetchSite)
+			}
+			rec := httptest.NewRecorder()
+			srv.ServeHTTP(rec, req)
+			gotOK := rec.Code == http.StatusOK
+			if gotOK != tc.wantOK || (hits > before) != tc.wantOK {
+				t.Fatalf("status %d, reached upstream %v; want allowed=%v", rec.Code, hits > before, tc.wantOK)
+			}
+			if !tc.wantOK && rec.Code != http.StatusForbidden {
+				t.Fatalf("expected 403, got %d", rec.Code)
+			}
+		})
+	}
+}
+
 // TestProxy_RequestScannedWhateverTheContentType: the request scan must
 // not hinge on the client spelling "application/json" exactly. A JSON
 // body under a differently-cased, "+json", wrong or missing Content-Type

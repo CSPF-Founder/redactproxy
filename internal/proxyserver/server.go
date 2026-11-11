@@ -13,7 +13,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -65,6 +67,7 @@ type Server struct {
 	sem          chan struct{}
 	logger       *slog.Logger
 	debug        *debuglog.Logger
+	allowedHosts map[string]bool
 }
 
 // Config configures a new Server. Upstream and Engine are required;
@@ -79,6 +82,10 @@ type Config struct {
 	// body logging; see package debuglog. Nil (the default) disables
 	// this entirely at effectively zero per-request cost.
 	DebugLogger *debuglog.Logger
+	// AllowedHosts are extra DNS names clients may address this proxy by,
+	// on top of "localhost" and any IP literal, which are always
+	// accepted; see Server.browserOriginProblem.
+	AllowedHosts []string
 }
 
 func New(cfg Config) *Server {
@@ -105,7 +112,13 @@ func New(cfg Config) *Server {
 	transport.MaxIdleConnsPerHost = maxConcurrent
 	transport.IdleConnTimeout = 90 * time.Second
 
+	allowedHosts := make(map[string]bool, len(cfg.AllowedHosts))
+	for _, h := range cfg.AllowedHosts {
+		allowedHosts[normalizeHost(h)] = true
+	}
+
 	return &Server{
+		allowedHosts: allowedHosts,
 		upstream:     cfg.Upstream,
 		engine:       cfg.Engine,
 		maxBodyBytes: maxBody,
@@ -124,6 +137,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// rotates, if needed, at this exact boundary rather than reactively
 	// mid-round-trip.
 	s.debug.BeginRoundTrip()
+
+	if problem := s.browserOriginProblem(r); problem != "" {
+		s.logger.Warn("request refused: "+problem, "host", r.Host, "origin", r.Header.Get("Origin"), "path", r.URL.Path)
+		writeAPIError(w, http.StatusForbidden, "permission_error", "refused by the local proxy: "+problem)
+		return
+	}
 
 	select {
 	case s.sem <- struct{}{}:
@@ -213,6 +232,68 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.proxyBuffered(w, resp, r.URL.Path)
+}
+
+// browserOriginProblem reports why r looks like it was sent by a web
+// page rather than by a client pointed at this proxy on purpose, or ""
+// if it doesn't.
+//
+// The proxy has no authentication and detokenizes every response, and it
+// listens on a well-known local port, which makes it a target for any
+// page open in the operator's browser. Some placeholders are cheap to
+// enumerate (a fake IPv4 is a small counter plus the real host octet), so
+// a page that can read responses can recover real addresses with an API
+// key of its own. Two routes get it there, and both show up in headers
+// the page cannot forge:
+//
+//   - DNS rebinding: the page's own hostname is re-pointed at this
+//     machine, so its requests are same-origin and readable. They arrive
+//     with that hostname in Host. A client configured with an IP or
+//     "localhost" never sends a DNS name there, so only "localhost", IP
+//     literals and names the operator listed are accepted.
+//   - A cross-origin request straight at the IP: Host is fine, but the
+//     browser attaches Origin (and Sec-Fetch-Site) naming the page.
+//
+// An IP-literal Host is accepted whatever the address, so a proxy bound
+// to 0.0.0.0 keeps working for clients that reach it by LAN IP.
+func (s *Server) browserOriginProblem(r *http.Request) string {
+	if !s.hostAllowed(r.Host) {
+		return "Host is not an IP address, localhost, or a name given with --allow-host"
+	}
+	if origin := r.Header.Get("Origin"); origin != "" {
+		u, err := url.Parse(origin)
+		if err != nil || u.Host == "" || !s.hostAllowed(u.Host) {
+			return "cross-origin browser request"
+		}
+	}
+	if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+		return "cross-site browser request"
+	}
+	return ""
+}
+
+func (s *Server) hostAllowed(hostport string) bool {
+	host := normalizeHost(hostport)
+	if host == "localhost" || s.allowedHosts[host] {
+		return true
+	}
+	_, err := netip.ParseAddr(host)
+	return err == nil
+}
+
+// normalizeHost reduces a Host header or --allow-host value to a bare
+// lowercase hostname or IP: no port, no IPv6 brackets or zone, no
+// trailing dot.
+func normalizeHost(hostport string) string {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	if i := strings.IndexByte(host, '%'); i != -1 {
+		host = host[:i]
+	}
+	return strings.ToLower(strings.TrimSuffix(host, "."))
 }
 
 func (s *Server) buildUpstreamRequest(r *http.Request, body []byte) (*http.Request, error) {

@@ -198,6 +198,7 @@ func runProxy(args []string) error {
 	var (
 		listen         = fs.String("listen", defaultListenAddr, "address to listen on (loopback only unless --allow-non-loopback is also given)")
 		allowNonLoop   = fs.Bool("allow-non-loopback", false, "allow --listen on a non-loopback address (a LAN IP, 0.0.0.0, the bare \":8787\" shorthand). The proxy has no authentication: anyone who can reach the port can use it and get this engagement's REAL values back in responses. Logs a warning at startup. Only for a network you fully control")
+		allowHost      = fs.String("allow-host", "", "comma-separated DNS names clients may use to reach this proxy, e.g. buildbox.lan. Only needed with --allow-non-loopback when clients connect by name: requests addressed to localhost or to any IP address are always accepted, and any other Host is refused as a possible browser DNS-rebinding attack")
 		engagementFlag = fs.String("engagement", "", "engagement name; each engagement gets its own persistent token store. Remembered per-folder after the first explicit use (see .redactproxy-engagement), so you don't have to repeat it on every run from the same folder.")
 		dataDir        = fs.String("data-dir", "", "base directory for engagement data (default: $HOME/.redactproxy)")
 		upstream       = fs.String("upstream", "", "the real API base URL to proxy to (default: https://api.anthropic.com, or whatever 'redactproxy wizard' saved for this engagement in upstream.txt under its data dir)")
@@ -422,6 +423,7 @@ func runProxy(args []string) error {
 		MaxConcurrent: *maxConcurrent,
 		Logger:        logger,
 		DebugLogger:   debugLogger,
+		AllowedHosts:  splitHostList(*allowHost),
 	})
 
 	httpServer := &http.Server{
@@ -1085,6 +1087,18 @@ func checkMiBFlag(name string, mib, defaultMiB int64) error {
 		return fmt.Errorf("%s is too large, got %d (maximum %d); converting it to bytes overflows, which would silently fall back to the %d MiB default instead of erroring", name, mib, int64(maxMiBFlagValue), defaultMiB)
 	}
 	return nil
+}
+
+// splitHostList parses --allow-host: comma-separated names, blanks
+// dropped.
+func splitHostList(s string) []string {
+	var hosts []string
+	for h := range strings.SplitSeq(s, ",") {
+		if h = strings.TrimSpace(h); h != "" {
+			hosts = append(hosts, h)
+		}
+	}
+	return hosts
 }
 
 // nonLoopbackWarning is logged at startup when --allow-non-loopback lets
