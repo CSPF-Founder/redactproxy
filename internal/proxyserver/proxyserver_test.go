@@ -230,6 +230,68 @@ func TestProxy_AutoModeSafeguards_TokenizedConsistentlyWithMessages(t *testing.T
 	}
 }
 
+// TestProxy_RequestScannedWhateverTheContentType: the request scan must
+// not hinge on the client spelling "application/json" exactly. A JSON
+// body under a differently-cased, "+json", wrong or missing Content-Type
+// is tokenized all the same, and one that starts like JSON but is
+// malformed is blocked rather than forwarded.
+func TestProxy_RequestScannedWhateverTheContentType(t *testing.T) {
+	var captured []byte
+	hits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured, _ = io.ReadAll(r.Body)
+		hits++
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"type":"message","role":"assistant","content":[]}`)
+	}))
+	defer upstream.Close()
+	ts := newTestServer(t, upstream)
+
+	body := `{"model":"m","messages":[{"role":"user","content":"check widgetcorp-fixture.com"}]}`
+	for _, ct := range []string{"application/json", "Application/JSON", "application/json; charset=utf-8", "APPLICATION/JSON;charset=UTF-8", "application/vnd.api+json", "text/plain", ""} {
+		t.Run("ct="+ct, func(t *testing.T) {
+			req, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/messages", strings.NewReader("\n "+body))
+			if ct != "" {
+				req.Header.Set("Content-Type", ct)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status %d", resp.StatusCode)
+			}
+			if strings.Contains(string(captured), "widgetcorp-fixture.com") {
+				t.Fatalf("real value reached upstream: %s", captured)
+			}
+		})
+	}
+
+	t.Run("malformed JSON under text/plain is blocked", func(t *testing.T) {
+		before := hits
+		resp, err := http.Post(ts.URL+"/v1/messages", "text/plain", strings.NewReader(`{"messages":[{"role":"user","content":"check widgetcorp-fixture.com`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadGateway || hits != before {
+			t.Fatalf("expected the request blocked before upstream, got status %d, upstream hits %d->%d", resp.StatusCode, before, hits)
+		}
+	})
+
+	t.Run("non-JSON body still passes through", func(t *testing.T) {
+		resp, err := http.Post(ts.URL+"/v1/files", "multipart/form-data; boundary=x", strings.NewReader("--x\r\ncontent\r\n--x--"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || string(captured) != "--x\r\ncontent\r\n--x--" {
+			t.Fatalf("status %d, upstream got %q", resp.StatusCode, captured)
+		}
+	})
+}
+
 // TestProxy_RequestBodyBoundary_ExactlyAtLimitAccepted_OneByteOverRejected
 // pins down the exact off-by-one behavior of MaxBodyBytes on the request
 // side, which the existing TestProxy_RequestTooLarge_Rejected doesn't --

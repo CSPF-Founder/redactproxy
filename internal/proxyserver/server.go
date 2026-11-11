@@ -155,7 +155,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	outBody := reqBody
-	if len(reqBody) > 0 && looksLikeJSON(r.Header.Get("Content-Type")) {
+	// Scanned on what the body looks like, not only on what the header
+	// claims: a JSON body sent as "text/plain" or with no Content-Type at
+	// all can still be parsed as JSON upstream, so trusting the header
+	// alone forwarded it with every real value intact.
+	if len(reqBody) > 0 && (looksLikeJSON(r.Header.Get("Content-Type")) || startsLikeJSON(reqBody)) {
 		tokenized, err := jsonwalk.Tokenize(reqBody, s.engine.Tokenize)
 		if err != nil {
 			// Fail closed: a redaction failure must never result in the
@@ -262,8 +266,24 @@ func (s *Server) proxyBuffered(w http.ResponseWriter, resp *http.Response, path 
 	_, _ = w.Write(outBody)
 }
 
+// looksLikeJSON reports whether a Content-Type header declares JSON:
+// application/json or any "+json" structured-syntax type, with or
+// without parameters. Media types are case-insensitive (RFC 9110).
 func looksLikeJSON(contentType string) bool {
-	return strings.HasPrefix(strings.TrimSpace(contentType), "application/json")
+	mediaType, _, _ := strings.Cut(contentType, ";")
+	mediaType = strings.ToLower(strings.TrimSpace(mediaType))
+	return mediaType == "application/json" || strings.HasSuffix(mediaType, "+json")
+}
+
+// startsLikeJSON reports whether body opens a JSON object or array,
+// whatever its Content-Type says. Deliberately not a validity check: a
+// body that starts like JSON but is malformed or truncated still carries
+// its real values, and routing it to jsonwalk.Tokenize gets it blocked
+// there instead of forwarded. A bare JSON scalar doesn't count: no API
+// request body is one, and it would make plain text like "123" qualify.
+func startsLikeJSON(body []byte) bool {
+	trimmed := bytes.TrimLeft(body, " \t\r\n")
+	return len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[')
 }
 
 func copyHeader(dst, src http.Header) {
