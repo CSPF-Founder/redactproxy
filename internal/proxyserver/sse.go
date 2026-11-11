@@ -199,8 +199,8 @@ func (s *Server) proxySSE(w http.ResponseWriter, resp *http.Response, path strin
 			writeSSEFrame(w, event, data)
 			flusher.Flush()
 		default:
-			// message_start, message_delta, message_stop, ping, and
-			// anything else: none carry redactable content.
+			// message_start, ping, and anything else: none carry
+			// redactable content.
 			writeSSEFrame(w, event, data)
 			flusher.Flush()
 		}

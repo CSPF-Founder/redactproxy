@@ -268,6 +268,9 @@ func TestProxy_BrowserOriginRequestsRefused(t *testing.T) {
 		{"rebinding with Origin", "evil.example:8787", "http://evil.example:8787", "same-origin", false},
 		{"name that only starts with localhost", "localhost.evil.example:8787", "", "", false},
 		{"cross-origin fetch", "127.0.0.1:8787", "https://evil.example", "", false},
+		{"cross-origin fetch from a page served by bare IP", "192.168.0.190:8787", "http://203.0.113.5", "", false},
+		{"page on another localhost port", "localhost:8787", "http://localhost:3000", "same-site", false},
+		{"same-origin page, host in other case", "LocalHost:8787", "http://localhost:8787", "same-origin", true},
 		{"opaque origin", "127.0.0.1:8787", "null", "", false},
 		{"cross-site without Origin", "127.0.0.1:8787", "", "cross-site", false},
 		{"empty Host", "", "", "", false},
@@ -460,6 +463,18 @@ func TestProxy_RequestScannedWhateverTheContentType(t *testing.T) {
 	t.Run("malformed JSON under text/plain is blocked", func(t *testing.T) {
 		before := hits
 		resp, err := http.Post(ts.URL+"/v1/messages", "text/plain", strings.NewReader(`{"messages":[{"role":"user","content":"check widgetcorp-fixture.com`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadGateway || hits != before {
+			t.Fatalf("expected the request blocked before upstream, got status %d, upstream hits %d->%d", resp.StatusCode, before, hits)
+		}
+	})
+
+	t.Run("JSON behind a byte-order mark is blocked", func(t *testing.T) {
+		before := hits
+		resp, err := http.Post(ts.URL+"/v1/messages", "text/plain", strings.NewReader("\xef\xbb\xbf"+body))
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -262,7 +262,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 //     "localhost" never sends a DNS name there, so only "localhost", IP
 //     literals and names the operator listed are accepted.
 //   - A cross-origin request straight at the IP: Host is fine, but the
-//     browser attaches Origin (and Sec-Fetch-Site) naming the page.
+//     browser attaches Origin (and Sec-Fetch-Site) naming the page. An
+//     Origin is accepted only when it is this proxy's own address.
 //
 // An IP-literal Host is accepted whatever the address, so a proxy bound
 // to 0.0.0.0 keeps working for clients that reach it by LAN IP.
@@ -270,9 +271,12 @@ func (s *Server) browserOriginProblem(r *http.Request) string {
 	if !s.hostAllowed(r.Host) {
 		return "Host is not an IP address, localhost, or a name given with --allow-host"
 	}
+	// Same-origin only, not merely "an allowed host": a page served from
+	// a bare IP address, or from another port on localhost, would pass a
+	// host check and is still somebody else's page.
 	if origin := r.Header.Get("Origin"); origin != "" {
 		u, err := url.Parse(origin)
-		if err != nil || u.Host == "" || !s.hostAllowed(u.Host) {
+		if err != nil || u.Host == "" || !strings.EqualFold(u.Host, r.Host) {
 			return "cross-origin browser request"
 		}
 	}
@@ -429,7 +433,9 @@ func looksLikeJSONLines(contentType string) bool {
 // there instead of forwarded. A bare JSON scalar doesn't count: no API
 // request body is one, and it would make plain text like "123" qualify.
 func startsLikeJSON(body []byte) bool {
-	trimmed := bytes.TrimLeft(body, " \t\r\n")
+	// A UTF-8 byte-order mark ahead of the JSON is skipped for this test
+	// only; the walker then rejects the body, BOM and all, as malformed.
+	trimmed := bytes.TrimLeft(bytes.TrimPrefix(body, []byte("\xef\xbb\xbf")), " \t\r\n")
 	return len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[')
 }
 
