@@ -620,7 +620,19 @@ func rememberEngagement(name string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(cwd, engagementMarkerFile), []byte(name+"\n"), 0o600)
+	path := filepath.Join(cwd, engagementMarkerFile)
+	// The marker lives in whatever folder the operator happens to be in,
+	// which may be a repository somebody else prepared. os.WriteFile
+	// follows a symlink and truncates its target, so a marker planted as
+	// a link would turn a read-only command such as `rules show
+	// --engagement x` into an overwrite of any file the operator can
+	// write. Only a regular file, or nothing, is ever written over.
+	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
+		return fmt.Errorf("%s exists and is not a regular file; refusing to write through it", path)
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return os.WriteFile(path, []byte(name+"\n"), 0o600)
 }
 
 // resolveEngagement returns the engagement name to use for a

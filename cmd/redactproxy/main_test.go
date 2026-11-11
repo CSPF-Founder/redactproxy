@@ -38,6 +38,31 @@ func TestRememberEngagement_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestRememberEngagement_RefusesSymlink: a marker planted as a symlink
+// (a hostile repository) must not make the write land on its target.
+func TestRememberEngagement_RefusesSymlink(t *testing.T) {
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "victim.txt")
+	if err := os.WriteFile(victim, []byte("precious\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	work := filepath.Join(dir, "work")
+	if err := os.Mkdir(work, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(work, engagementMarkerFile)); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	t.Chdir(work)
+	if err := rememberEngagement("some-engagement"); err == nil {
+		t.Fatal("expected a symlinked marker to be refused")
+	}
+	got, _ := os.ReadFile(victim)
+	if string(got) != "precious\n" {
+		t.Fatalf("symlink target was overwritten: %q", got)
+	}
+}
+
 func TestRememberEngagement_OverwritesPreviousValue(t *testing.T) {
 	t.Chdir(t.TempDir())
 	if err := rememberEngagement("first-client"); err != nil {
