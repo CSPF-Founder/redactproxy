@@ -619,46 +619,79 @@ func redactValue(v gjson.Result, tf func(string) (string, error)) (string, error
 // top-level field is excluded.
 func collectPaths(raw []byte) (paths []string, inputPaths []string, unknownType string) {
 	root := gjson.ParseBytes(raw)
+	note := func(t string) {
+		if t != "" && unknownType == "" {
+			unknownType = t
+		}
+	}
 
-	if msgs := root.Get("messages"); msgs.IsArray() {
+	note(collectMessagePaths(root, "", &paths, &inputPaths))
+
+	// Message Batches. A create-batch body holds one ordinary Messages
+	// request per entry under requests[].params, and each line of a
+	// batch's results holds one ordinary response under result.message.
+	// Neither was walked, so a batch client pointed at the proxy sent
+	// every conversation unredacted and got placeholders back.
+	if reqs := root.Get("requests"); reqs.IsArray() {
+		reqs.ForEach(func(ri, req gjson.Result) bool {
+			if params := req.Get("params"); params.IsObject() {
+				note(collectMessagePaths(params, fmt.Sprintf("requests.%d.params.", ri.Int()), &paths, &inputPaths))
+			}
+			return true
+		})
+	}
+	if msg := root.Get("result.message"); msg.IsObject() {
+		note(collectMessagePaths(msg, "result.message.", &paths, &inputPaths))
+	}
+
+	return paths, inputPaths, unknownType
+}
+
+// collectMessagePaths collects the paths for one Messages API request or
+// response object. prefix is that object's own gjson path with a
+// trailing dot, or "" when it is the body's root.
+func collectMessagePaths(obj gjson.Result, prefix string, paths *[]string, inputPaths *[]string) (unknownType string) {
+	note := func(t string) {
+		if t != "" && unknownType == "" {
+			unknownType = t
+		}
+	}
+
+	if msgs := obj.Get("messages"); msgs.IsArray() {
 		msgs.ForEach(func(mi, msg gjson.Result) bool {
-			base := fmt.Sprintf("messages.%d.content", mi.Int())
+			base := fmt.Sprintf("%smessages.%d.content", prefix, mi.Int())
 			content := msg.Get("content")
 
 			if content.Type == gjson.String {
-				paths = append(paths, base)
+				*paths = append(*paths, base)
 				return true
 			}
 			if content.IsArray() {
-				if t := collectBlockArrayPaths(content, base, &paths, &inputPaths); t != "" && unknownType == "" {
-					unknownType = t
-				}
+				note(collectBlockArrayPaths(content, base, paths, inputPaths))
 			}
 			return true
 		})
 	}
 
-	if tools := root.Get("tools"); tools.IsArray() {
+	if tools := obj.Get("tools"); tools.IsArray() {
 		tools.ForEach(func(ti, tool gjson.Result) bool {
-			collectMCPToolPaths(tool, fmt.Sprintf("tools.%d", ti.Int()), &paths)
+			collectMCPToolPaths(tool, fmt.Sprintf("%stools.%d", prefix, ti.Int()), paths)
 			return true
 		})
 	}
 
-	if sg := root.Get("safeguards"); sg.Exists() {
-		collectSafeguardStrings(sg, "safeguards", &paths)
+	if sg := obj.Get("safeguards"); sg.Exists() {
+		collectSafeguardStrings(sg, prefix+"safeguards", paths)
 	}
 
 	// Non-streaming responses are a single Message object with a
 	// top-level "content" array (no "messages" wrapper; the response
 	// IS the content, unlike a request body).
-	if content := root.Get("content"); content.IsArray() {
-		if t := collectBlockArrayPaths(content, "content", &paths, &inputPaths); t != "" && unknownType == "" {
-			unknownType = t
-		}
+	if content := obj.Get("content"); content.IsArray() {
+		note(collectBlockArrayPaths(content, prefix+"content", paths, inputPaths))
 	}
 
-	return paths, inputPaths, unknownType
+	return unknownType
 }
 
 // collectBlockArrayPaths applies the per-block-type routing rules (text,

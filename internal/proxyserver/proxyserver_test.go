@@ -296,6 +296,52 @@ func TestProxy_BrowserOriginRequestsRefused(t *testing.T) {
 	}
 }
 
+// TestProxy_MessageBatches_TokenizedOutDetokenizedBack: a create-batch
+// body is tokenized entry by entry, and the JSONL results come back with
+// the real values restored on every line.
+func TestProxy_MessageBatches_TokenizedOutDetokenizedBack(t *testing.T) {
+	var created []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			created, _ = io.ReadAll(r.Body)
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"id":"msgbatch_1","type":"message_batch"}`)
+			return
+		}
+		// Results: echo each entry's (tokenized) prompt back as the answer.
+		w.Header().Set("Content-Type", "application/x-jsonl")
+		gjson.GetBytes(created, "requests").ForEach(func(_, req gjson.Result) bool {
+			line, _ := json.Marshal(map[string]any{"custom_id": req.Get("custom_id").String(), "result": map[string]any{"type": "succeeded", "message": map[string]any{
+				"role": "assistant", "content": []map[string]any{{"type": "text", "text": "done: " + req.Get("params.messages.0.content").String()}}}}})
+			fmt.Fprintf(w, "%s\n", line)
+			return true
+		})
+	}))
+	defer upstream.Close()
+	ts := newTestServer(t, upstream)
+
+	body := `{"requests":[{"custom_id":"a","params":{"model":"m","messages":[{"role":"user","content":"scan widgetcorp-fixture.com"}]}},{"custom_id":"b","params":{"model":"m","messages":[{"role":"user","content":"ping 10.20.30.40"}]}}]}`
+	resp, err := http.Post(ts.URL+"/v1/messages/batches", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if strings.Contains(string(created), "widgetcorp-fixture.com") || strings.Contains(string(created), "10.20.30.40") {
+		t.Fatalf("real value reached upstream in a batch: %s", created)
+	}
+
+	resp, err = http.Get(ts.URL + "/v1/messages/batches/msgbatch_1/results")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	results, _ := io.ReadAll(resp.Body)
+	lines := strings.Split(strings.TrimSpace(string(results)), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], "done: scan widgetcorp-fixture.com") || !strings.Contains(lines[1], "done: ping 10.20.30.40") {
+		t.Fatalf("batch results not detokenized line by line: %s", results)
+	}
+}
+
 // TestProxy_RequestScannedWhateverTheContentType: the request scan must
 // not hinge on the client spelling "application/json" exactly. A JSON
 // body under a differently-cased, "+json", wrong or missing Content-Type

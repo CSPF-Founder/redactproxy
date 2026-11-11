@@ -113,9 +113,6 @@ Besides `system`, these fields go to the API as sent:
   authorization tokens. Claude Code's ordinary local MCP servers do not
   use this field.
 - **`stop_sequences`** and **`metadata`**.
-- **Batch requests** (`/v1/messages/batches`). Their conversations sit
-  under `requests[].params`, which is not walked. Claude Code does not
-  use this endpoint; don't point a batch client at the proxy.
 
 ## HTTP headers
 

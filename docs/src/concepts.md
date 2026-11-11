@@ -154,6 +154,11 @@ Deliberately not scanned:
 A body is scanned whenever it is JSON, whatever its `Content-Type`
 header says; one that starts like JSON but is malformed is blocked.
 
+Message Batches are covered as well, for other clients you point at the
+proxy (Claude Code does not use them): each entry of a create-batch body
+is scanned like a normal request, and each line of the batch's results
+has its real values restored.
+
 The definitions of MCP tools in the `tools` array are scanned too: the
 tool's description, and the descriptions, titles, defaults, enum values
 and examples in its input schema. An MCP server is yours, and its

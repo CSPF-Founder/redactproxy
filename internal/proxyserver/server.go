@@ -336,8 +336,20 @@ func (s *Server) proxyBuffered(w http.ResponseWriter, resp *http.Response, path 
 	}
 
 	outBody := body
-	if len(body) > 0 && looksLikeJSON(resp.Header.Get("Content-Type")) {
+	switch ct := resp.Header.Get("Content-Type"); {
+	case len(body) == 0:
+	case looksLikeJSON(ct):
 		outBody = jsonwalk.Detokenize(body, s.engine.Detokenize)
+	case looksLikeJSONLines(ct):
+		// A batch's results: one JSON document per line, each wrapping
+		// an ordinary response message (see jsonwalk.collectPaths).
+		lines := bytes.Split(body, []byte("\n"))
+		for i, line := range lines {
+			if len(bytes.TrimSpace(line)) > 0 {
+				lines[i] = jsonwalk.Detokenize(line, s.engine.Detokenize)
+			}
+		}
+		outBody = bytes.Join(lines, []byte("\n"))
 	}
 	s.debug.FullBody("response", path, outBody, body) // (real, tokenized) -- detokenize direction, so real is the OUTPUT here
 
@@ -354,6 +366,17 @@ func looksLikeJSON(contentType string) bool {
 	mediaType, _, _ := strings.Cut(contentType, ";")
 	mediaType = strings.ToLower(strings.TrimSpace(mediaType))
 	return mediaType == "application/json" || strings.HasSuffix(mediaType, "+json")
+}
+
+// looksLikeJSONLines reports whether a Content-Type header declares
+// newline-delimited JSON, which is how the API serves batch results.
+func looksLikeJSONLines(contentType string) bool {
+	mediaType, _, _ := strings.Cut(contentType, ";")
+	switch strings.ToLower(strings.TrimSpace(mediaType)) {
+	case "application/x-jsonl", "application/jsonl", "application/x-ndjson", "application/jsonlines":
+		return true
+	}
+	return false
 }
 
 // startsLikeJSON reports whether body opens a JSON object or array,

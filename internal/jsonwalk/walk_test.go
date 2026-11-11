@@ -668,6 +668,46 @@ func TestTokenize_ToolAddition_MCPDefinitionScanned(t *testing.T) {
 	}
 }
 
+// TestTokenize_BatchRequests_EachParamsScanned: a create-batch body
+// carries one ordinary Messages request per entry under
+// requests[].params; each is scanned exactly like a top-level request,
+// and an unrecognized block type in any of them still fails closed.
+func TestTokenize_BatchRequests_EachParamsScanned(t *testing.T) {
+	in := []byte(`{"requests":[{"custom_id":"real-target.example-1","params":{"model":"m","system":"sys real-target.example","messages":[{"role":"user","content":"scan real-target.example"}]}},{"custom_id":"b","params":{"model":"m","tools":[{"name":"mcp__db__q","description":"db01.real-target.example"}],"messages":[{"role":"user","content":[{"type":"text","text":"second real-target.example"},{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ping real-target.example"}}]}]}}]}`)
+	out, err := Tokenize(in, markTransform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := mustPretty(t, out)
+	for _, want := range []string{
+		`"custom_id":"real-target.example-1"`,
+		`"system":"sys real-target.example"`,
+		`"content":"TOK:scan real-target.example"`,
+		`"description":"TOK:db01.real-target.example"`,
+		`"text":"TOK:second real-target.example"`,
+		`"input":{"TOK:command":"TOK:ping real-target.example"}`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("missing %s in: %s", want, s)
+		}
+	}
+
+	unknown := []byte(`{"requests":[{"custom_id":"a","params":{"messages":[{"role":"user","content":[{"type":"some_future_block","data":"real-target.example"}]}]}}]}`)
+	if _, err := Tokenize(unknown, markTransform); err == nil || !strings.Contains(err.Error(), "some_future_block") {
+		t.Fatalf("expected an unknown block inside a batch entry to fail closed, got: %v", err)
+	}
+}
+
+// TestDetokenize_BatchResultLine: one line of a batch's results wraps an
+// ordinary response message under result.message.
+func TestDetokenize_BatchResultLine(t *testing.T) {
+	in := []byte(`{"custom_id":"a","result":{"type":"succeeded","message":{"id":"msg_1","role":"assistant","content":[{"type":"text","text":"TOKEN"}]}}}`)
+	out := Detokenize(in, func(s string) string { return strings.ReplaceAll(s, "TOKEN", "real-target.example") })
+	if !strings.Contains(string(out), `"text":"real-target.example"`) {
+		t.Fatalf("batch result line not detokenized: %s", out)
+	}
+}
+
 // TestTokenize_Safeguards_ContextScanned: auto mode's "safeguards"
 // field repeats the working directory, git remote and permission rules
 // the conversation already carries tokenized; every string in it must be
