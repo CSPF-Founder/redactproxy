@@ -292,7 +292,7 @@ func TestMintAndRegisterSpan_TokenAlreadyKnownButSpanIsNew(t *testing.T) {
 }
 
 func TestMintAndRegisterSpan_FailureRollsBackEverything(t *testing.T) {
-	// Exhaust the IP-network token pool (256 slots -- see nextIPNetwork)
+	// Exhaust the default IP-network token pool (512 slots -- see nextIPNetwork)
 	// first, then attempt a MULTI-lookup mint where the SECOND lookup is
 	// the one that fails, proving the FIRST lookup's mint doesn't get
 	// persisted as an orphan when the overall call fails, unlike what two
@@ -301,21 +301,16 @@ func TestMintAndRegisterSpan_FailureRollsBackEverything(t *testing.T) {
 	// nanpFakeAreaCodes widened that pool enough that exhausting it here
 	// would be impractically slow; the IP-network pool is still small and
 	// unchanged, so it takes over this role.
-	// The real pool is tens of thousands of slots; shrink it for this
-	// test so exhausting it stays fast.
-	old := maxIPNetworks
-	maxIPNetworks = 256
-	t.Cleanup(func() { maxIPNetworks = old })
 	s := openTemp(t)
-	for i := 0; i < 256; i++ {
-		if _, err := s.GetOrCreateToken(fmt.Sprintf("10.0.%d", i), EntityIPNetwork); err != nil {
+	for i := 0; i < int(DefaultIPNetworks); i++ {
+		if _, err := s.GetOrCreateToken(fmt.Sprintf("10.%d.%d", i/256, i%256), EntityIPNetwork); err != nil {
 			t.Fatalf("mint #%d: %v", i, err)
 		}
 	}
 
 	buildSpan := func(toks []string) string { return toks[0] + "|" + toks[1] }
 	_, err := s.MintAndRegisterSpan(
-		[]string{"newdomain-for-rollback-test.example", "10.1.0"},
+		[]string{"newdomain-for-rollback-test.example", "10.9.0"},
 		[]EntityType{EntityDomain, EntityIPNetwork},
 		buildSpan,
 	)

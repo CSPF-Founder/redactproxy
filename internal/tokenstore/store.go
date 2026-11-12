@@ -203,6 +203,10 @@ type Store struct {
 	// deletes counts successful Delete calls; see DeleteCount.
 	deletes atomic.Uint64
 
+	// extendedIPv4 is whether new IPv4 network tokens may come from
+	// 240.x.y once 198.18.0.0/15 is full; see SetExtendedIPv4Pool.
+	extendedIPv4 atomic.Bool
+
 	// spanTrie backs RegisterSpan/SafeFlushPoint/AlreadyTokenizedSpans
 	// (see spans.go) and carries its own lock, deliberately separate
 	// from mu: span registration and the real/token maps are independent
@@ -332,7 +336,7 @@ func (s *Store) GetOrCreateToken(real string, et EntityType) (string, error) {
 	var token string
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		var genErr error
-		token, genErr = nextToken(tx, et, s.token2real)
+		token, genErr = nextToken(tx, et, s.token2real, s.ipNetworkLimit())
 		if genErr != nil {
 			return genErr
 		}
@@ -434,6 +438,22 @@ func (s *Store) Delete(real string) (bool, error) {
 	delete(s.token2real, token)
 	s.deletes.Add(1)
 	return true, nil
+}
+
+// SetExtendedIPv4Pool chooses what happens when an engagement has used
+// all 512 network tokens in 198.18.0.0/15: off (the default), the next
+// new network fails closed; on, tokens continue in 240.x.y. It only
+// governs minting. Tokens already stored, from either range, keep
+// resolving in both directions whatever this is set to.
+func (s *Store) SetExtendedIPv4Pool(on bool) {
+	s.extendedIPv4.Store(on)
+}
+
+func (s *Store) ipNetworkLimit() uint32 {
+	if s.extendedIPv4.Load() {
+		return ExtendedIPNetworks
+	}
+	return DefaultIPNetworks
 }
 
 // DeleteCount reports how many mappings have been deleted from this

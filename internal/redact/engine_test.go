@@ -385,6 +385,7 @@ func TestEngine_TokenRemoval_InvalidatesTokenizeCache(t *testing.T) {
 // host octet, and detokenizes back, including when it is re-sent.
 func TestEngine_IPv4Networks_ThreeRangesRoundTrip(t *testing.T) {
 	e, store := newTestEngine(t)
+	store.SetExtendedIPv4Pool(true)
 	real := func(i int) string { return fmt.Sprintf("10.%d.%d", i/256, i%256) }
 	for i := 0; i < 520; i++ {
 		if _, err := store.GetOrCreateToken(real(i), tokenstore.EntityIPNetwork); err != nil {
@@ -429,5 +430,52 @@ func TestEngine_IPv4PlaceholderRanges_LeftAlone(t *testing.T) {
 		if out, _ := e.Tokenize(in); out == in {
 			t.Errorf("%q: expected a real address just outside the token ranges to be redacted", in)
 		}
+	}
+}
+
+// TestEngine_IPv4Networks_DefaultPoolFailsClosedThenExtends: without the
+// extended pool the 513th network is refused (and the request with it),
+// naming the flag. Switching the pool on continues at the very next
+// slot, and switching it off again leaves every stored token, 240.x
+// included, resolving in both directions while new networks are refused.
+func TestEngine_IPv4Networks_DefaultPoolFailsClosedThenExtends(t *testing.T) {
+	e, store := newTestEngine(t)
+	real := func(i int) string { return fmt.Sprintf("10.%d.%d", i/256, i%256) }
+	for i := 0; i < int(tokenstore.DefaultIPNetworks); i++ {
+		tok, err := store.GetOrCreateToken(real(i), tokenstore.EntityIPNetwork)
+		if err != nil {
+			t.Fatalf("mint #%d: %v", i, err)
+		}
+		if !strings.HasPrefix(tok, "198.18.") && !strings.HasPrefix(tok, "198.19.") {
+			t.Fatalf("network #%d got %q, outside 198.18.0.0/15", i, tok)
+		}
+	}
+
+	const in = "host 10.200.1.9 is up"
+	if out, err := e.Tokenize(in); err == nil || !strings.Contains(err.Error(), "--extended-ipv4-pool") {
+		t.Fatalf("expected the 513th network to fail closed naming the flag, got %q, %v", out, err)
+	}
+
+	store.SetExtendedIPv4Pool(true)
+	out, err := e.Tokenize(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "host 240.0.0.9 is up" {
+		t.Fatalf("expected the first extended slot, 240.0.0, got %q", out)
+	}
+
+	store.SetExtendedIPv4Pool(false)
+	if again, err := e.Tokenize("recheck 10.200.1.44"); err != nil || again != "recheck 240.0.0.44" {
+		t.Fatalf("a network minted in the extended pool must keep its token with the pool off, got %q, %v", again, err)
+	}
+	if back := e.Detokenize(out); back != in {
+		t.Fatalf("240.x token did not detokenize with the pool off: %q", back)
+	}
+	if first := e.Detokenize("host 198.18.0.7"); first != "host 10.0.0.7" {
+		t.Fatalf("an original 198.18 mapping changed: %q", first)
+	}
+	if _, err := e.Tokenize("new 10.201.1.1"); err == nil {
+		t.Fatal("expected a new network to be refused again with the pool off")
 	}
 }

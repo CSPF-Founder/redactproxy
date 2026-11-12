@@ -315,7 +315,7 @@ func (s *Store) MintAndRegisterSpan(reals []string, types []EntityType, buildSpa
 				tokens[i] = tok
 				continue
 			}
-			tok, genErr := nextToken(tx, types[i], s.token2real)
+			tok, genErr := nextToken(tx, types[i], s.token2real, s.ipNetworkLimit())
 			if genErr != nil {
 				return fmt.Errorf("mint token for %s: %w", types[i], genErr)
 			}
