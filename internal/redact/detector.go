@@ -1940,3 +1940,112 @@ var anthropicKeyDetector = wholeMatchDetector{anthropicKeyRe, tokenstore.EntityA
 var razorpayRe = regexp.MustCompile(`(?i)\brzp_live_[A-Za-z0-9]{14}\b`)
 
 var razorpayDetector = wholeMatchDetector{razorpayRe, tokenstore.EntityRazorpay, tokenstore.TokenRazorpayPrefix}
+
+// --- Other vendor-prefixed keys -------------------------------------------
+
+// vendorKeyPatterns are credential shapes with a vendor-specific prefix
+// that have no dedicated detector. Each is distinctive enough to match
+// without a keyword next to it, which is where the generic
+// bareCredentialKeywordRe cannot help: a key pasted into a log line or a
+// sentence. Where a pattern has a capture group, only the group is the
+// secret.
+//
+// They share one opaque token shape (tokenstore.EntityBearerToken)
+// instead of a look-alike each. The model rarely needs to know which
+// vendor a redacted key belongs to beyond what the text around it says,
+// and one shape keeps a new entry here to a single line.
+var vendorKeyPatterns = []*regexp.Regexp{
+	// Google OAuth client secret and access token.
+	regexp.MustCompile(`\bGOCSPX-[A-Za-z0-9_-]{28}\b`),
+	regexp.MustCompile(`\bya29\.[A-Za-z0-9_-]{30,}`),
+	// Hugging Face user access token.
+	regexp.MustCompile(`\bhf_[A-Za-z0-9]{34,40}\b`),
+	// Shopify access tokens (private app, custom app, shared secret, partner).
+	regexp.MustCompile(`\bshp(?:at|ca|pa|ss)_[0-9a-fA-F]{32}\b`),
+	// PyPI upload token: the fixed prefix is base64 of "pypi.org".
+	regexp.MustCompile(`\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,}`),
+	// Databricks personal access token.
+	regexp.MustCompile(`\bdapi[0-9a-f]{32}\b`),
+	// Slack app-level token (xox?- tokens have their own detector).
+	regexp.MustCompile(`\bxapp-\d-[A-Z0-9]{8,}-\d{10,}-[A-Za-z0-9]{32,}\b`),
+	// Telegram bot token: numeric bot id, then a 35-character secret.
+	regexp.MustCompile(`\b\d{8,10}:AA[A-Za-z0-9_-]{33}\b`),
+	// Discord bot token: base64 user id, timestamp, HMAC.
+	regexp.MustCompile(`\b[MNO][A-Za-z0-9_-]{23,25}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,38}\b`),
+	// Microsoft Entra (Azure AD) client secret.
+	regexp.MustCompile(`(?:^|[^A-Za-z0-9_~.-])([A-Za-z0-9_~.-]{3}\dQ~[A-Za-z0-9_~.-]{31,34})(?:$|[^A-Za-z0-9_~.-])`),
+	// Azure Storage shared access signature: the sig parameter is the
+	// credential; the rest of the URL is redacted as a URL already.
+	regexp.MustCompile(`[?&]sig=([A-Za-z0-9%+/]{40,}(?:=|%3[Dd]){0,2})`),
+}
+
+type vendorKeyDetector struct{}
+
+func (vendorKeyDetector) Detect(text string) ([]Detection, error) {
+	var out []Detection
+	for _, re := range vendorKeyPatterns {
+		for _, loc := range re.FindAllStringSubmatchIndex(text, -1) {
+			start, end := loc[0], loc[1]
+			if len(loc) >= 4 && loc[2] >= 0 {
+				start, end = loc[2], loc[3]
+			}
+			val := text[start:end]
+			if strings.Contains(val, tokenstore.TokenBearerPrefix) {
+				continue // already a token
+			}
+			out = append(out, simpleDetection(start, end, val, tokenstore.EntityBearerToken))
+		}
+	}
+	return out, nil
+}
+
+// --- Single-label internal hostnames --------------------------------------
+
+// A hostname with no dot ("appdbnode02", "internalhost07") is invisible
+// to the domain detector, which needs a public suffix, yet on an
+// internal network that is what most hosts are called. On its own such a
+// word is indistinguishable from any identifier, so it is recognised
+// only by position: as the host of a URL, or after "@" with a port.
+//
+// The scheme must be letters only, which keeps out the "h1://..." that a
+// go.sum hash can begin with, and a mixed-case label is skipped as an
+// encoded blob. Two further limits keep ordinary development text out: the label must
+// be at least five characters and contain a digit. That is how server
+// names are overwhelmingly written, and it excludes "localhost" and the
+// service names of a compose file ("db", "redis", "api", "web"). A host
+// named without a digit, and any mention outside these positions, still
+// needs `rules block`.
+var (
+	bareHostInURLRe      = regexp.MustCompile(`(?i)\b[a-z][a-z+.-]+://(?:[^\s/@]+@)?([a-z][a-z0-9-]{3,61}[a-z0-9])(?::\d{1,5})?(?:[^a-z0-9.:@-]|$)`)
+	bareHostAtPortRe     = regexp.MustCompile(`(?i)@([a-z][a-z0-9-]{3,61}[a-z0-9]):\d{1,5}\b`)
+	genericHostExampleRe = regexp.MustCompile(`^(?:host|hostname|myhost|server|example|node|machine)\d+$`)
+	domainTokenOnlyRe    = regexp.MustCompile(`^` + regexp.QuoteMeta(tokenstore.TokenDomainPrefix) + `[0-9a-f]{16}$`)
+)
+
+type bareHostDetector struct{}
+
+func (bareHostDetector) Detect(text string) ([]Detection, error) {
+	var out []Detection
+	for _, re := range []*regexp.Regexp{bareHostInURLRe, bareHostAtPortRe} {
+		for _, loc := range re.FindAllStringSubmatchIndex(text, -1) {
+			start, end := loc[2], loc[3]
+			orig := text[start:end]
+			label := strings.ToLower(orig)
+			if !strings.ContainsAny(label, "0123456789") || domainTokenOnlyRe.MatchString(label) ||
+				strings.HasPrefix(label, strings.ToLower(tokenstore.TokenConnStringMarker)) {
+				continue // no digit, or already one of this tool's own tokens
+			}
+			if orig != label && orig != strings.ToUpper(orig) {
+				continue // mixed case: an encoded blob or an identifier, not how hosts are written
+			}
+			if genericHostExampleRe.MatchString(label) {
+				continue // "host1", "server2": documentation stand-ins
+			}
+			// Stored as a domain so it gets a domain-shaped token, which
+			// is still a valid hostname where it stands; having no public
+			// suffix, it has no suffix to echo.
+			out = append(out, simpleDetection(start, end, label, tokenstore.EntityDomain))
+		}
+	}
+	return out, nil
+}

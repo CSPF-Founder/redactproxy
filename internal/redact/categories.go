@@ -32,6 +32,7 @@ func DefaultCategorizedDetectors() []CategorizedDetector {
 	return []CategorizedDetector{
 		{emailDetector{}, "contact", "email", "Email addresses."},
 		{domainDetector{}, "network", "domain", "Domain names and hostnames, bare or embedded in a URL."},
+		{bareHostDetector{}, "network", "internal_host", "Internal hostnames with no dot (appdbnode02), when they contain a digit and stand as the host of a URL or before a port after \"@\"."},
 		{ipv4Detector{}, "network", "ipv4", "IPv4 addresses."},
 		{ipv6Detector{}, "network", "ipv6", "IPv6 addresses."},
 		{macDetector{}, "network", "mac", "MAC addresses."},
@@ -71,6 +72,7 @@ func DefaultCategorizedDetectors() []CategorizedDetector {
 		{twilioSIDDetector, "comms", "twilio", "Twilio account SIDs."},
 		{sendGridKeyDetector, "comms", "sendgrid", "SendGrid API keys."},
 		{npmTokenDetector, "packages", "npm", "npm access tokens."},
+		{vendorKeyDetector{}, "secrets", "vendor_keys", "Other vendor-prefixed keys: Google OAuth, Hugging Face, Shopify, PyPI, Databricks, Slack app, Telegram and Discord bot tokens, Microsoft Entra client secrets, and the signature of an Azure SAS URL."},
 	}
 }
 

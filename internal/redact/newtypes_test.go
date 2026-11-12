@@ -3,6 +3,7 @@ package redact
 import (
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -1602,5 +1603,143 @@ func TestGPPCPassword_RoundTrip(t *testing.T) {
 	}
 	if back := e.Detokenize(out); back != in {
 		t.Fatalf("round-trip mismatch:\n  in:   %q\n  out:  %q\n  back: %q", in, out, back)
+	}
+}
+
+// TestVendorKeys_RedactedWithoutAKeyword: vendor-prefixed keys with no
+// dedicated detector are caught on shape alone, in prose with no
+// credential keyword nearby, and round-trip.
+func TestVendorKeys_RedactedWithoutAKeyword(t *testing.T) {
+	body := "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdefghijklmnopqrstuvwxyz"
+	secrets := map[string]string{
+		"google oauth secret": googleOAuthSecretPrefix + body[:28],
+		"google oauth token":  googleOAuthTokenPrefix + body[:60],
+		"hugging face":        huggingFacePrefix + body[:34],
+		"shopify":             shopifyPrefix + "0123456789abcdef0123456789abcdef",
+		"pypi":                pypiPrefix + body[:50],
+		"databricks":          databricksPrefix + "0123456789abcdef0123456789abcdef",
+		"slack app":           slackAppPrefix + "1-A0ABCDEFGHI-1234567890123-" + body[36:] + body[:14],
+		"telegram bot":        telegramBotPrefix + body[:33],
+		"discord bot":         "MTA" + body[:21] + ".Gh" + body[:4] + "." + body[:38],
+		"entra client secret": body[:3] + "8Q~" + body[:34],
+	}
+	for name, secret := range secrets {
+		t.Run(name, func(t *testing.T) {
+			e, _ := newCorpusEngine(t)
+			in := "the scan output contained " + secret + " in a comment"
+			out, err := e.Tokenize(in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(out, secret) {
+				t.Fatalf("not redacted: %q", out)
+			}
+			if !strings.HasPrefix(out, "the scan output contained ") || !strings.HasSuffix(out, " in a comment") {
+				t.Fatalf("surrounding text changed: %q", out)
+			}
+			if back := e.Detokenize(out); back != in {
+				t.Fatalf("round trip: %q", back)
+			}
+		})
+	}
+}
+
+// TestVendorKeys_AzureSASSignature: in a shared access signature URL the
+// sig parameter is the credential. Only its value is replaced; the other
+// parameters stay readable.
+func TestVendorKeys_AzureSASSignature(t *testing.T) {
+	e, _ := newCorpusEngine(t)
+	sig := "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdefg%3D"
+	in := "GET /c/f?sv=2022-11-02&sr=b&sig=" + sig + "&se=2026-12-01 HTTP/1.1"
+	out, err := e.Tokenize(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, sig) || !strings.Contains(out, "sv=2022-11-02&sr=b&sig=") || !strings.Contains(out, "&se=2026-12-01") {
+		t.Fatalf("expected only the sig value replaced: %q", out)
+	}
+	if back := e.Detokenize(out); back != in {
+		t.Fatalf("round trip: %q", back)
+	}
+}
+
+// TestVendorKeys_NotOverMatched: near-misses of the vendor shapes stay.
+func TestVendorKeys_NotOverMatched(t *testing.T) {
+	for _, in := range []string{
+		"cache key hf_short and module hf_hub",
+		"dapi is the databricks api; dapiVersion = 2",
+		"timestamp 1234567890:AA is not a token",
+		"see page?sig=abc123 for the signature format",
+		"version v1.2.3.4 and file a.b.c",
+		"shpat_ tokens start with that prefix",
+	} {
+		e, _ := newCorpusEngine(t)
+		if out, _ := e.Tokenize(in); out != in {
+			t.Errorf("over-matched:\n  in:  %q\n  out: %q", in, out)
+		}
+	}
+}
+
+// TestBareHost_RedactedInHostPosition: an internal hostname with no dot
+// is redacted where it is unmistakably a host -- a URL's authority, or
+// after "@" with a port -- keeps one token across mentions, and
+// round-trips. The same word in running prose is not touched.
+func TestBareHost_RedactedInHostPosition(t *testing.T) {
+	cases := map[string]string{
+		"http://internalhost07:9090/path":         "internalhost07",
+		"curl -s https://homfinapp12c/login":      "homfinapp12c",
+		"jdbc:oracle:thin:@appdbnode02:1521/ORCL": "appdbnode02",
+		"git clone ssh://git@buildsrv3/repo.git":  "buildsrv3",
+		"mongodb://svc:x@mongo-node1:27017/app":   "mongo-node1",
+		`<a href="http://sisazcmsapp01">cms</a>`:  "sisazcmsapp01",
+		"proxy_pass http://APPNODE02:8080;":       "APPNODE02",
+	}
+	for in, host := range cases {
+		e, _ := newCorpusEngine(t)
+		out, err := e.Tokenize(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(strings.ToLower(out), strings.ToLower(host)) {
+			t.Errorf("host not redacted:\n  in:  %q\n  out: %q", in, out)
+			continue
+		}
+		if again, _ := e.Tokenize(out); again != out {
+			t.Errorf("token re-tokenized: %q -> %q", out, again)
+		}
+		if back := e.Detokenize(out); !strings.EqualFold(back, in) && !strings.Contains(in, "@mongo") && !strings.Contains(in, "svc:x") {
+			t.Errorf("round trip:\n  in:   %q\n  back: %q", in, back)
+		}
+	}
+
+	e, _ := newCorpusEngine(t)
+	first, _ := e.Tokenize("http://internalhost07:9090/a")
+	second, _ := e.Tokenize("then http://internalhost07/b")
+	tok := regexp.MustCompile(`tok[0-9a-f]{16}`)
+	if tok.FindString(first) == "" || tok.FindString(first) != tok.FindString(second) {
+		t.Fatalf("expected one stable token for the host: %q / %q", first, second)
+	}
+}
+
+// TestBareHost_OrdinaryNamesLeftAlone: no digit, too short, localhost,
+// compose-style service names, and anything outside a host position.
+func TestBareHost_OrdinaryNamesLeftAlone(t *testing.T) {
+	for _, in := range []string{
+		"curl http://localhost:8080/health",
+		"redis://redis:6379/0 and http://db:5432 and http://api/v1",
+		"http://backend/ready and http://nginx:80",
+		"ssh into sisazcmsapp01 next",
+		"the variable appnode02 is unused",
+		"email me @handle1 or see section 3:45",
+		"http://web1/ is too short a name to act on",
+		"import x from 'node:fs2'",
+		"postgres://host1:1,host2:2,host3:3 and http://server2/ in the docs",
+		"example.com/cycle v1.5.0/go.mod h1://AqZbyNHeLOKZB3J/UPPXaBvk3nCqvqVRbPk=",
+		"fetch http://AqZbyNHe7LOK/x",
+	} {
+		e, _ := newCorpusEngine(t)
+		if out, _ := e.Tokenize(in); out != in {
+			t.Errorf("changed:\n  in:  %q\n  out: %q", in, out)
+		}
 	}
 }
