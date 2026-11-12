@@ -851,3 +851,53 @@ func TestAddPromptReminderHook(t *testing.T) {
 		t.Fatalf("settings file mode %v, want 0600", info.Mode().Perm())
 	}
 }
+
+// TestOfferPromptReminder: asked with a default of no, added on yes or
+// when the flag pre-answers, never asked when the settings file was not
+// written or the hook is already there.
+func TestOfferPromptReminder(t *testing.T) {
+	newSettings := func(t *testing.T) string {
+		path := filepath.Join(t.TempDir(), "settings.local.json")
+		if err := os.WriteFile(path, []byte(`{"env":{}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	has := func(path string) bool {
+		data, _ := os.ReadFile(path)
+		return strings.Contains(string(data), promptReminderMarker)
+	}
+	cases := []struct {
+		name, input          string
+		wrote, flag, wantSet bool
+	}{
+		{"enter takes the default, no", "\n", true, false, false},
+		{"no", "n\n", true, false, false},
+		{"yes", "y\n", true, false, true},
+		{"flag adds it without asking", "", true, true, true},
+		{"settings not written, flag given", "", false, true, false},
+		{"settings not written, would have said yes", "y\n", false, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := newSettings(t)
+			offerPromptReminder(bufio.NewReader(strings.NewReader(tc.input)), path, tc.wrote, tc.flag)
+			if has(path) != tc.wantSet {
+				t.Fatalf("hook present = %v, want %v", has(path), tc.wantSet)
+			}
+		})
+	}
+
+	t.Run("already present is left alone and not asked", func(t *testing.T) {
+		path := newSettings(t)
+		if err := addPromptReminderHook(path); err != nil {
+			t.Fatal(err)
+		}
+		before, _ := os.ReadFile(path)
+		offerPromptReminder(bufio.NewReader(strings.NewReader("n\n")), path, true, false)
+		after, _ := os.ReadFile(path)
+		if string(before) != string(after) {
+			t.Fatalf("settings changed:\n%s\n->\n%s", before, after)
+		}
+	})
+}

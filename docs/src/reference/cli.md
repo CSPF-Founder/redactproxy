@@ -90,9 +90,10 @@ and offers to write `.claude/settings.local.json`.
 the settings file, so it must match what you actually start the proxy
 with.
 
-`--prompt-reminder` is opt-in. It adds a Claude Code hook to the
-settings file that repeats a one-line reminder of the placeholder rules
-on every prompt. See
+The wizard also asks whether to add a per-prompt reminder, defaulting
+to no; `--prompt-reminder` answers yes without asking. It is a Claude
+Code hook in the settings file that repeats a one-line reminder of the
+placeholder rules on every prompt. See
 [Configuring Claude Code](../claude-code.md#the-prompt-reminder-hook).
 
 With no `--engagement` and no folder marker, the wizard offers a picker

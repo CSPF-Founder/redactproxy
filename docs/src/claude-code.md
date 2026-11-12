@@ -196,7 +196,9 @@ detects the existing note and leaves the file unchanged.
 The `CLAUDE.md` note is read at the start of a session. In a long one it
 ends up far back in the conversation, and Claude can drift from it:
 retyping a placeholder slightly wrong, or commenting on placeholder
-ranges. If you see that, re-run the wizard with `--prompt-reminder`:
+ranges. The wizard asks whether to add a reminder for this, defaulting
+to no. If you declined and see drift later, re-run the wizard and answer
+yes, or pass the flag to skip the question:
 
 ```bash
 redactproxy wizard --prompt-reminder

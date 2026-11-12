@@ -37,7 +37,7 @@ func runWizard(args []string) error {
 	engagementFlag := fs.String("engagement", "", "engagement name (interactive picker if omitted and this folder has no marker yet; see .redactproxy-engagement)")
 	dataDir := fs.String("data-dir", "", "base directory for engagement data (default: $HOME/.redactproxy)")
 	listen := fs.String("listen", defaultListenAddr, "address the proxy will listen on; used to pre-configure this folder's Claude Code settings, must match what you actually start redactproxy with")
-	promptReminder := fs.Bool("prompt-reminder", false, "also add a Claude Code hook to this folder's settings that repeats a one-line reminder of the placeholder rules on every prompt. Helps in long sessions, where the CLAUDE.md note is far back in the conversation; costs a few dozen tokens per prompt")
+	promptReminder := fs.Bool("prompt-reminder", false, "add the per-prompt reminder without asking: a Claude Code hook in this folder's settings that repeats a one-line reminder of the placeholder rules on every prompt. Helps in long sessions, where the CLAUDE.md note is far back in the conversation; costs about 60 words of input per prompt. Without this flag the wizard asks")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -195,19 +195,7 @@ func runWizard(args []string) error {
 	wroteMemory := offerClaudeMemory(reader, cwd)
 	fmt.Println()
 	wroteSettings := offerProjectSettings(reader, cwd, *listen, debugLogPath, providerEnv, removeEnvKeys)
-	if *promptReminder {
-		settingsPath := filepath.Join(cwd, ".claude", "settings.local.json")
-		switch {
-		case !wroteSettings:
-			fmt.Println("--prompt-reminder: skipped, because this folder's Claude Code settings were not written")
-		default:
-			if err := addPromptReminderHook(settingsPath); err != nil {
-				fmt.Printf("--prompt-reminder: could not add the hook to %s: %v\n", settingsPath, err)
-			} else {
-				fmt.Printf("added the placeholder-rules reminder hook to %s\n", settingsPath)
-			}
-		}
-	}
+	offerPromptReminder(reader, filepath.Join(cwd, ".claude", "settings.local.json"), wroteSettings, *promptReminder)
 
 	fmt.Println()
 	fmt.Println("Next: start the proxy:")
@@ -929,6 +917,39 @@ func offerProjectSettings(r *bufio.Reader, cwd, listen, debugLogPath string, pro
 	}
 	fmt.Printf("wrote %s\n", settingsPath)
 	return true
+}
+
+// offerPromptReminder adds the reminder hook when the operator asked for
+// it with --prompt-reminder, and otherwise asks, defaulting to no since
+// the hook costs input on every prompt. There is nothing to add it to
+// unless the settings file was just written, and nothing to ask when the
+// hook is already there.
+func offerPromptReminder(r *bufio.Reader, settingsPath string, wroteSettings, preAnswered bool) {
+	if !wroteSettings {
+		if preAnswered {
+			fmt.Println("--prompt-reminder: skipped, because this folder's Claude Code settings were not written")
+		}
+		return
+	}
+	if data, err := os.ReadFile(settingsPath); err == nil && strings.Contains(string(data), promptReminderMarker) && !preAnswered {
+		fmt.Println("the per-prompt placeholder reminder is already set up in this folder, left unchanged")
+		return
+	}
+	if !preAnswered {
+		fmt.Println()
+		fmt.Println("Optional: a per-prompt reminder. In a long session Claude can drift from the")
+		fmt.Println("CLAUDE.md note (retyping a placeholder wrongly, commenting on fake IP ranges).")
+		fmt.Println("This adds a one-line reminder of the rules to every prompt you send. It costs")
+		fmt.Println("about 60 words of input per prompt, and you can remove it from the settings later.")
+		if !promptYesNo(r, "Add the per-prompt reminder?", false) {
+			return
+		}
+	}
+	if err := addPromptReminderHook(settingsPath); err != nil {
+		fmt.Printf("could not add the reminder hook to %s: %v\n", settingsPath, err)
+		return
+	}
+	fmt.Printf("added the per-prompt reminder hook to %s\n", settingsPath)
 }
 
 // promptReminderMarker identifies this tool's own hook entry, so adding
