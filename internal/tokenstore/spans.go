@@ -351,6 +351,7 @@ func (s *Store) MintAndRegisterSpan(reals []string, types []EntityType, buildSpa
 	for i, real := range reals {
 		s.real2token[real] = tokens[i]
 		s.token2real[tokens[i]] = real
+		s.noteLabelOnly(real, types[i])
 	}
 	s.mu.Unlock()
 

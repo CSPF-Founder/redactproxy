@@ -29,6 +29,7 @@ import (
 // path.
 type Engine struct {
 	store         *tokenstore.Store
+	known         knownValues
 	detectors     atomic.Pointer[[]Detector]
 	allowPatterns atomic.Pointer[[]*regexp.Regexp]
 	debug         atomic.Pointer[debuglog.Logger]
@@ -144,8 +145,10 @@ func (e *Engine) Tokenize(text string) (string, error) {
 	// `tokens remove` (the running proxy's console does this live) a
 	// cached output can hold a token whose mapping is gone. Both counters
 	// only grow, so their sum identifies a configuration-and-store state
-	// no earlier entry can share.
-	gen := e.gen.Load() + e.store.DeleteCount()
+	// no earlier entry can share. So does the label-only version (see
+	// knownValueDetections): text cached before a secret became known
+	// must be scanned again for it.
+	gen := e.gen.Load() + e.store.DeleteCount() + e.store.LabelOnlyVersion()
 	if cached, ok := e.cache.get(text, gen); ok {
 		return cached, nil
 	}
@@ -172,6 +175,7 @@ func (e *Engine) Tokenize(text string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	dets = append(dets, e.knownValueDetections(text)...)
 	dets = e.filterAllowed(dets)
 	dets = e.filterAlreadyTokenized(dets, text)
 	dets = resolveOverlaps(dets)

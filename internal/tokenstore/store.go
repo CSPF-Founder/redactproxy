@@ -203,6 +203,12 @@ type Store struct {
 	// deletes counts successful Delete calls; see DeleteCount.
 	deletes atomic.Uint64
 
+	// labelOnly holds every stored real value whose entity type is in
+	// labelOnlyTypes, mapped to that type; labelOnlyVer counts changes to
+	// it. Guarded by mu like the maps above. See LabelOnlyValues.
+	labelOnly    map[string]EntityType
+	labelOnlyVer atomic.Uint64
+
 	// extendedIPv4 is whether new IPv4 network tokens may come from
 	// 240.x.y once 198.18.0.0/15 is full; see SetExtendedIPv4Pool.
 	extendedIPv4 atomic.Bool
@@ -285,6 +291,16 @@ func (s *Store) loadAll() error {
 			return err
 		}
 
+		if err := tx.Bucket(bucketMeta).ForEach(func(k, v []byte) error {
+			var meta entityMeta
+			if json.Unmarshal(v, &meta) == nil {
+				s.noteLabelOnly(string(k), meta.EntityType)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+
 		spans := tx.Bucket(bucketSpans)
 		return spans.ForEach(func(k, _ []byte) error {
 			s.spanTrie.insert(string(k))
@@ -361,7 +377,61 @@ func (s *Store) GetOrCreateToken(real string, et EntityType) (string, error) {
 
 	s.real2token[real] = token
 	s.token2real[token] = real
+	s.noteLabelOnly(real, et)
 	return token, nil
+}
+
+// labelOnlyTypes are the entity types detected only by the label next to
+// the value -- "password: X", "Authorization: Bearer X", a keyword such
+// as client_secret -- rather than by a shape of their own. Once such a
+// value has been redacted, the operator sees it restored in Claude's
+// reply, and Claude Code sends that reply back as history on every later
+// request, often with the label no longer next to it ("the password is
+// X"). Detection alone would then let it through. LabelOnlyValues lets
+// the engine search for these values wherever they appear.
+var labelOnlyTypes = map[EntityType]bool{
+	EntityPassword:          true,
+	EntityPasswordHash:      true,
+	EntityBearerToken:       true,
+	EntityAWSSecretKey:      true,
+	EntityGPPCPassword:      true,
+	EntityBitbucket:         true,
+	EntityItsdangerousToken: true,
+}
+
+// noteLabelOnly records real if et is a label-only type. Callers hold mu
+// or are still single-threaded (loadAll).
+func (s *Store) noteLabelOnly(real string, et EntityType) {
+	if !labelOnlyTypes[et] {
+		return
+	}
+	if s.labelOnly == nil {
+		s.labelOnly = map[string]EntityType{}
+	}
+	if _, ok := s.labelOnly[real]; ok {
+		return
+	}
+	s.labelOnly[real] = et
+	s.labelOnlyVer.Add(1)
+}
+
+// LabelOnlyValues returns every stored value of a label-only type (see
+// labelOnlyTypes) with its type, and a version that changes whenever the
+// set does, so a caller can cache whatever it builds from the set.
+func (s *Store) LabelOnlyValues() (map[string]EntityType, uint64) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]EntityType, len(s.labelOnly))
+	for k, v := range s.labelOnly {
+		out[k] = v
+	}
+	return out, s.labelOnlyVer.Load()
+}
+
+// LabelOnlyVersion is LabelOnlyValues' version alone, without copying the
+// set.
+func (s *Store) LabelOnlyVersion() uint64 {
+	return s.labelOnlyVer.Load()
 }
 
 // Entry describes one real<->token mapping and its metadata: the unit
@@ -436,6 +506,10 @@ func (s *Store) Delete(real string) (bool, error) {
 
 	delete(s.real2token, real)
 	delete(s.token2real, token)
+	if _, ok := s.labelOnly[real]; ok {
+		delete(s.labelOnly, real)
+		s.labelOnlyVer.Add(1)
+	}
 	s.deletes.Add(1)
 	return true, nil
 }
