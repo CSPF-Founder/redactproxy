@@ -227,7 +227,10 @@ returns an error rather than forwarding bytes. An unredacted forward is
 the one outcome this project treats as worse than a broken request.
 
 Check the proxy's output for the specific reason. A body over
-`--max-body-mb` (64 MiB by default) is a common one.
+`--max-body-mb` (64 MiB by default) is a common one. Another is
+`exhausted the IPv4 network token space`: the engagement has seen more
+than 512 distinct /24 networks, typically from a wide scan. Restart the
+proxy with `--extended-ipv4-pool`.
 
 ## `403` with `refused by the local proxy`
 

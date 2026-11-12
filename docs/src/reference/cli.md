@@ -37,6 +37,7 @@ every `rules` and `tokens` subcommand.
 |---|---|---|
 | `--listen` | `127.0.0.1:8787` | address to listen on; loopback only unless `--allow-non-loopback` is given |
 | `--allow-non-loopback` | `false` | allow a non-loopback `--listen`; logs a warning; see below |
+| `--extended-ipv4-pool` | `false` | continue IPv4 placeholders in `240.0.0.0/4` after the 512 in `198.18.0.0/15` are used; see [Placeholder shapes](./placeholders.md) |
 | `--allow-host` | none | comma-separated DNS names clients may use to reach the proxy; see below |
 | `--upstream` | `upstream.txt`, else `https://api.anthropic.com` | the API base URL to proxy to |
 | `--disable` | none | comma-separated categories to disable for this run only |

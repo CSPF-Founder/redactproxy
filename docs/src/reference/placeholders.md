@@ -18,7 +18,7 @@ with and does not identify anyone.
 |---|---|---|
 | Domain | `tok<16 hex>.<real suffix>` | the real public suffix, and any subdomain |
 | Email | `user-<12 hex>@<domain token>` | the shape, and which org the domain belongs to |
-| IPv4 | `198.18.<n>.<real host octet>`; then `198.19.<n>.…` and `240.<a>.<b>.…` | the host octet, so hosts stay distinguishable |
+| IPv4 | `198.18.<n>.<real host octet>`, then `198.19.<n>.…`; `240.<a>.<b>.…` with `--extended-ipv4-pool` | the host octet, so hosts stay distinguishable |
 | IPv6 | `fd00:c0de:<32 bits>:<real interface ID>` | the 64-bit interface ID |
 | NANP phone | `<area code>-555-01<2 digits>` | that it is a NANP number |
 | International phone | `<real country code> 555-<4 digits>` | the real country calling code |
@@ -44,9 +44,12 @@ relationships between hosts without ever seeing whose they are.
   `192.168.x` addresses, and the token space must not overlap real
   targets. The first 256 networks of an engagement use `198.18.x`, the
   next 256 use `198.19.x`.
-- **`240.0.0.0/8`** is part of the reserved "class E" block, which is
-  never routed and not assigned to hosts. It is used only once both
-  halves of `198.18.0.0/15` are full, as `240.<a>.<b>.<host>`.
+- **`240.0.0.0/4`** is the reserved "class E" block, which is never
+  routed and not assigned to hosts. It is used only if you start the
+  proxy with `--extended-ipv4-pool`, and then only once both halves of
+  `198.18.0.0/15` are full. Placeholders there are written
+  `240.<a>.<b>.<host>`. The RFC 5737 documentation ranges (TEST-NET) are
+  never used for placeholders.
 
 An address that is already inside one of these ranges is never redacted,
 because it cannot be told apart from a placeholder. That is harmless for
@@ -159,11 +162,14 @@ rather than at reasoning around the token.
 Two placeholder spaces are counter-allocated rather than random, and one
 of them is finite:
 
-- **IPv4 networks: 66,048 per engagement.** Each distinct real /24 gets
-  one: 512 in `198.18.0.0/15`, then 65,536 in `240.0.0.0/8`. That covers
-  a sweep of a whole /16 with room to spare. Slots are not reused, so
-  `tokens remove` does not free one, and a request that needs a network
-  past the last slot fails closed rather than reusing a placeholder.
+- **IPv4 networks: 512 per engagement by default.** Each distinct real
+  /24 gets one, all in `198.18.0.0/15`. A request that needs a 513th
+  fails closed rather than reusing a placeholder, and the proxy's log
+  names the fix: restart it with `--extended-ipv4-pool`, which adds
+  65,536 more in `240.0.0.0/4`. A sweep of a whole /16 needs that flag.
+  Slots are not reused, so `tokens remove` does not free one. Turning
+  the flag off again later is safe: placeholders already issued, in
+  either range, keep working.
 - **IPv6 networks: about 4.3 billion per engagement.** No realistic
   exhaustion risk.
 
