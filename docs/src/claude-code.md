@@ -172,6 +172,11 @@ It also covers several failure modes worth knowing about yourself:
   documentation space because it is reserved benchmarking space, chosen
   so it can never collide with a real target. It stands in for a real,
   sensitive address and should be reasoned about as one.
+- **Don't comment on placeholders, and never write a partial one.** You
+  see real values, so a remark about placeholder ranges means nothing to
+  you, and a partial address such as `198.18.x` cannot be restored and
+  reaches you as written. Complete hosts and complete CIDR blocks are
+  restored.
 - **An unfamiliar-looking token is not a bug.** It is either a token
   doing its job or an over-redaction of something merely domain-shaped.
   Either way the real value is substituted before execution, so the
@@ -189,7 +194,10 @@ session on the machine, including sessions with no proxy in front of
 them.
 
 Appending is idempotent. Re-running the wizard or `memory --write`
-detects the existing note and leaves the file unchanged.
+detects the existing note and leaves the file unchanged. That also
+means a folder set up with an older redactproxy keeps the note it has.
+To pick up a newer version of the note, delete the "Redaction proxy
+active" section from `CLAUDE.md` and run `memory --write` again.
 
 ## The prompt reminder hook
 
