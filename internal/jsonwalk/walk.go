@@ -382,8 +382,9 @@ func apply(raw []byte, paths []string, inputPaths []string, tf func(string) (str
 		raw        bool // newVal is already valid JSON text; splice verbatim, don't re-encode as a string
 	}
 	var changes []change
+	get := newSubtreeGetter(raw, root)
 	for _, p := range paths {
-		r := root.Get(p)
+		r := get(p)
 		orig := r.String()
 		newVal, err := tf(orig)
 		if err != nil {
@@ -435,6 +436,65 @@ func apply(raw []byte, paths []string, inputPaths []string, tf func(string) (str
 	}
 	out = append(out, raw[last:]...)
 	return out, nil
+}
+
+// newSubtreeGetter returns a lookup equivalent to root.Get(path), with
+// absolute byte offsets in Index, that resolves each path's first two
+// segments ("messages.12", "safeguards.0", "requests.3") once and looks
+// the rest up inside that subtree.
+//
+// gjson.Get walks the document from the top for every call, so a path
+// near the end of a large body re-reads everything before it. For one
+// body that cost is paths x body size: the auto-mode "safeguards" field
+// adds a few hundred string paths per request and sits after the whole
+// conversation, so measured on a 20-turn session's real requests it
+// nearly doubled the time spent redacting. With the prefix cached, each
+// lookup reads only its own message or field.
+//
+// Any result it cannot vouch for is left for apply's own check, which
+// compares the bytes at the reported offset with the value and falls
+// back to the slow per-path implementation on a mismatch, so this can
+// only ever make apply faster, not wrong.
+func newSubtreeGetter(raw []byte, root gjson.Result) func(path string) gjson.Result {
+	prefixes := map[string]gjson.Result{}
+	return func(path string) gjson.Result {
+		first := strings.IndexByte(path, '.')
+		second := -1
+		if first >= 0 {
+			if i := strings.IndexByte(path[first+1:], '.'); i >= 0 {
+				second = first + 1 + i
+			}
+		}
+		if second < 0 || strings.ContainsAny(path[:second], `\*?|#@`) {
+			return root.Get(path)
+		}
+		prefix, rest := path[:second], path[second+1:]
+		base, ok := prefixes[prefix]
+		if !ok {
+			base = root.Get(prefix)
+			prefixes[prefix] = base
+		}
+		if base.Index <= 0 || base.Index+len(base.Raw) > len(raw) {
+			return root.Get(path)
+		}
+		r := base.Get(rest)
+		// gjson reports a nested result's offset relative to the whole
+		// document (it adds the parent's own offset); an older version
+		// reported it relative to the parent. Accept whichever the bytes
+		// confirm, and otherwise take the slow lookup.
+		if matchesAt(raw, r.Index, r.Raw) {
+			return r
+		}
+		if matchesAt(raw, base.Index+r.Index, r.Raw) {
+			r.Index += base.Index
+			return r
+		}
+		return root.Get(path)
+	}
+}
+
+func matchesAt(raw []byte, at int, want string) bool {
+	return at > 0 && at+len(want) <= len(raw) && string(raw[at:at+len(want)]) == want
 }
 
 // applyPerPath is apply's fallback: leaf paths go through the original
