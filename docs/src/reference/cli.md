@@ -79,7 +79,7 @@ While it runs, the terminal is also a console: see
 ## `redactproxy wizard`
 
 ```bash
-redactproxy wizard [--engagement NAME] [--data-dir DIR] [--listen ADDR]
+redactproxy wizard [--engagement NAME] [--data-dir DIR] [--listen ADDR] [--prompt-reminder]
 ```
 
 Interactive setup. Collects customer names and domains, asks which API
@@ -89,6 +89,11 @@ and offers to write `.claude/settings.local.json`.
 `--listen` here does not start anything. It is the address written into
 the settings file, so it must match what you actually start the proxy
 with.
+
+`--prompt-reminder` is opt-in. It adds a Claude Code hook to the
+settings file that repeats a one-line reminder of the placeholder rules
+on every prompt. See
+[Configuring Claude Code](../claude-code.md#the-prompt-reminder-hook).
 
 With no `--engagement` and no folder marker, the wizard offers a picker
 over existing engagements rather than erroring the way non-interactive

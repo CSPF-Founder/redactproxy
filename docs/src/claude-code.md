@@ -190,3 +190,24 @@ them.
 
 Appending is idempotent. Re-running the wizard or `memory --write`
 detects the existing note and leaves the file unchanged.
+
+## The prompt reminder hook
+
+The `CLAUDE.md` note is read at the start of a session. In a long one it
+ends up far back in the conversation, and Claude can drift from it:
+retyping a placeholder slightly wrong, or commenting on placeholder
+ranges. If you see that, re-run the wizard with `--prompt-reminder`:
+
+```bash
+redactproxy wizard --prompt-reminder
+```
+
+It adds a `UserPromptSubmit` hook to `.claude/settings.local.json`. On
+every prompt the hook prints one line restating the rules, which Claude
+Code adds to the conversation next to your message. Other hooks in the
+file are left alone, and running it again replaces the entry rather than
+adding a second one.
+
+It is off by default because it costs about 60 words of input on every
+prompt. To remove it, delete the entry containing `[redactproxy]` from
+the `hooks` section of the settings file.
