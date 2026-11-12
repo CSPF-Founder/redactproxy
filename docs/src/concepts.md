@@ -124,17 +124,55 @@ Only the content-carrying strings inside a Messages API body: the
 `messages` array in a request, and the `content` array in a response.
 That is where operator and tool-output text lives.
 
+In auto mode, Claude Code also sends a `safeguards` field so the API can
+review each tool call before it runs. Its context repeats local details
+the conversation already describes: the working directory, the git
+remote, your permission allow and deny rules, and the auto-mode notes
+from your settings. Every text value in it is scanned with the same
+placeholders as the conversation, so the server's review sees the same
+redacted values the model does. Only the field's type tags and the
+tool-call IDs it refers to are left as they are. The review's verdicts
+come back in `safeguard_results`, which the proxy returns unchanged.
+
 Deliberately not scanned:
 
-- The top-level `system` field. It is Claude Code's own prompt
-  boilerplate, and this is where the working-directory leak in
-  [Known gaps](./security/gaps.md) comes from.
+- The top-level `system` field. It is mostly Claude Code's own prompt
+  boilerplate, but it also carries the project-memory directory name
+  behind the folder-name leak, and any system-prompt text of your own,
+  such as a custom agent's prompt. See
+  [Known gaps](./security/gaps.md).
 - `thinking` and `redacted_thinking` blocks. The text and its signature
   together are a cryptographic proof the API validates on replay, so any
   edit makes the next request fail.
-- Server-executed tool blocks (web search, code execution). These run on
-  Anthropic's own infrastructure and never carry local client data.
-- Images and documents, which are binary payloads rather than text.
+- Server-executed tool blocks (web search, web fetch, code execution,
+  server-side tool search). These run on Anthropic's own infrastructure
+  and never carry local client data.
+- Server-side `compaction` blocks. Like thinking, the summary is signed
+  and must go back byte-for-byte, and it was written from the already
+  redacted conversation.
+- Images and documents such as PDFs, which are binary payloads rather
+  than text. A file Claude reads this way goes out whole; see
+  [Known gaps](./security/gaps.md#pdfs-images-and-other-files-claude-reads-whole).
+
+A body is scanned whenever it is JSON, whatever its `Content-Type`
+header says; one that starts like JSON but is malformed is blocked. A
+gzip-compressed body is decompressed, scanned and forwarded
+uncompressed. Any other `Content-Encoding` is refused with a `415`,
+because a body the proxy cannot read is one it cannot redact.
+
+Message Batches are covered as well, for other clients you point at the
+proxy (Claude Code does not use them): each entry of a create-batch body
+is scanned like a normal request, and each line of the batch's results
+has its real values restored.
+
+The definitions of MCP tools in the `tools` array are scanned too: the
+tool's description, and the descriptions, titles, defaults, enum values
+and examples in its input schema. An MCP server is yours, and its
+descriptions often name client hosts. Tool names, property names and
+the rest of the schema are left as they are, and the definitions of
+Claude Code's built-in tools are never touched. The redacted text is
+the same on every request, so the prompt cache is not affected, and an
+enum value the model picks is restored before your MCP server sees it.
 
 MCP tool calls and results **are** scanned, unlike the server-executed
 blocks above. What separates them is where the tool runs: web search and
@@ -151,7 +189,23 @@ not modified. What gets scanned is the copy of the exchange carried in
 the API body: an `mcp_tool_result` is tokenized on the way out, and an
 `mcp_tool_use` in a response is detokenized before Claude Code executes
 it, so the MCP server itself receives the real values, exactly as `Bash`
-does.
+does. The same goes for `search_result` blocks inside a tool result: a
+local search tool's titles, URLs and snippets are scanned like any other
+tool output.
+
+A few block types are protocol markers with no content of their own, and
+pass through unchanged: `tool_reference` (Claude Code loading a deferred
+tool through tool search), `tool_addition` and `tool_removal` (an MCP
+server connecting or disconnecting mid-session), and `fallback` (the API
+switched to another model after a refusal). Each is accepted only in its
+exact known shape; one carrying any other field is treated as unknown.
+
+Switching models never needs anything from the proxy, whether by `/model`
+or by a refusal fallback: placeholders are stable for the engagement, so
+the new model sees the same ones. If a refusal cuts a streamed response
+off mid-block, the partial text is still restored in full, so the copy
+Claude Code sends back when it continues on a fallback model matches
+what the API produced.
 
 The rewrite is surgical: only the matched spans change, and every other
 byte, including JSON key order, is preserved. That matters because
@@ -174,10 +228,12 @@ What follows from that:
   `base64` doesn't look like anything to a regex. Decode it locally
   first.
 - **False positives happen.** The proxy inspects text and has no notion
-  of code structure, so something merely domain-shaped (`table.style`,
-  where `.style` is a real suffix) can occasionally get tokenized. This
-  is harmless in operation, since the real value is substituted back
-  before anything executes, and `rules allow` fixes it permanently.
+  of code structure, so something merely domain-shaped (`config.live`,
+  where `.live` is a real suffix) can occasionally get tokenized. Method
+  calls like `datetime.now()` and filename-like names like `server.py`
+  are recognized and left alone. The rest is harmless in operation,
+  since the real value is substituted back before anything executes,
+  and `rules allow` fixes it permanently.
 
 ## Fail closed
 
@@ -185,7 +241,10 @@ If the proxy cannot finish redacting a request, it returns an error
 rather than forwarding bytes. An unredacted forward is the one outcome
 this project treats as worse than a broken request. A malformed body, a
 detector that errors, a token store that can't commit: all of them fail
-the request instead of passing it through.
+the request instead of passing it through. So does a content block of a
+type the proxy doesn't recognize, such as one from a newer API feature:
+the request is refused with an error naming the type, rather than
+forwarded with that block unscanned.
 
 ## Cost
 

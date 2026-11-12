@@ -32,16 +32,18 @@ func DefaultCategorizedDetectors() []CategorizedDetector {
 	return []CategorizedDetector{
 		{emailDetector{}, "contact", "email", "Email addresses."},
 		{domainDetector{}, "network", "domain", "Domain names and hostnames, bare or embedded in a URL."},
+		{bareHostDetector{}, "network", "internal_host", "Internal hostnames with no dot (appdbnode02), when they contain a digit and stand as the host of a URL or before a port after \"@\"."},
 		{ipv4Detector{}, "network", "ipv4", "IPv4 addresses."},
 		{ipv6Detector{}, "network", "ipv6", "IPv6 addresses."},
 		{macDetector{}, "network", "mac", "MAC addresses."},
 		{phoneDetector{}, "contact", "phone", "NANP-shaped (US/Canada) phone numbers."},
 		{intlPhoneDetector{}, "contact", "intl_phone", "Non-NANP international phone numbers."},
 		{jwtDetector, "secrets", "jwt", "JSON Web Tokens (JWTs)."},
-		{bearerDetector{}, "secrets", "bearer_token", "Opaque Bearer/API tokens following an Authorization header."},
+		{bearerDetector{}, "secrets", "bearer_token", "Opaque Bearer/API tokens and HTTP Basic credentials following an Authorization header."},
 		{pemKeyDetector{}, "secrets", "pem_key", "PEM-armored private key blocks."},
 		{connStringDetector{}, "secrets", "connection_string", "Database/service connection strings with embedded credentials."},
 		{itsdangerousDetector{}, "secrets", "itsdangerous_token", "Flask itsdangerous-signed tokens (session/CSRF tokens)."},
+		{passwordDetector{}, "secrets", "password", "Plaintext passwords labeled by a password-like key (DB_PASSWORD=..., \"password\": \"...\", password: ...)."},
 		{hashDetector{}, "secrets", "password_hash", "Password hashes (MD5/NTLM/SHA-1/SHA-256), only when labeled by a nearby keyword, or in an Impacket secretsdump-style LM:NT pair."},
 		{adMachineAccountDetector, "windows_ad", "machine_account", "$-suffixed Active Directory machine/computer account names (e.g. \"WORKSTATION01$\") in a secretsdump.py/pwdump line."},
 		{gppCPasswordDetector, "windows_ad", "gpp_cpassword", "Group Policy Preferences \"cpassword\" values, trivially decryptable via Microsoft's published MS14-025 AES key."},
@@ -70,6 +72,7 @@ func DefaultCategorizedDetectors() []CategorizedDetector {
 		{twilioSIDDetector, "comms", "twilio", "Twilio account SIDs."},
 		{sendGridKeyDetector, "comms", "sendgrid", "SendGrid API keys."},
 		{npmTokenDetector, "packages", "npm", "npm access tokens."},
+		{vendorKeyDetector{}, "secrets", "vendor_keys", "Other vendor-prefixed keys: Google OAuth, Hugging Face, Shopify, PyPI, Databricks, Slack app, Telegram and Discord bot tokens, Microsoft Entra client secrets, and the signature of an Azure SAS URL."},
 	}
 }
 

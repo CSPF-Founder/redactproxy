@@ -196,7 +196,10 @@ func runProxy(args []string) error {
 	fs := flag.NewFlagSet("redactproxy", flag.ExitOnError)
 	setUsage(fs)
 	var (
-		listen         = fs.String("listen", defaultListenAddr, "address to listen on (loopback only, never expose this to the network)")
+		listen         = fs.String("listen", defaultListenAddr, "address to listen on (loopback only unless --allow-non-loopback is also given)")
+		allowNonLoop   = fs.Bool("allow-non-loopback", false, "allow --listen on a non-loopback address (a LAN IP, 0.0.0.0, the bare \":8787\" shorthand). The proxy has no authentication: anyone who can reach the port can use it and get this engagement's REAL values back in responses. Logs a warning at startup. Only for a network you fully control")
+		allowHost      = fs.String("allow-host", "", "comma-separated DNS names clients may use to reach this proxy, e.g. buildbox.lan. Only needed with --allow-non-loopback when clients connect by name: requests addressed to localhost or to any IP address are always accepted, and any other Host is refused as a possible browser DNS-rebinding attack")
+		extendedIPv4   = fs.Bool("extended-ipv4-pool", false, "allow fake IPv4 networks from 240.0.0.0/4 (reserved class E space) once the default pool is used up. By default each distinct real /24 gets a placeholder from 198.18.0.0/15, which holds 512; after that a request naming a new network is blocked. With this flag placeholders continue as 240.x.x.x, for 65,536 more networks. Placeholders already issued keep working either way")
 		engagementFlag = fs.String("engagement", "", "engagement name; each engagement gets its own persistent token store. Remembered per-folder after the first explicit use (see .redactproxy-engagement), so you don't have to repeat it on every run from the same folder.")
 		dataDir        = fs.String("data-dir", "", "base directory for engagement data (default: $HOME/.redactproxy)")
 		upstream       = fs.String("upstream", "", "the real API base URL to proxy to (default: https://api.anthropic.com, or whatever 'redactproxy wizard' saved for this engagement in upstream.txt under its data dir)")
@@ -325,6 +328,7 @@ func runProxy(args []string) error {
 			logger.Error("closing the token store failed", "path", dbPath, "err", err)
 		}
 	}()
+	store.SetExtendedIPv4Pool(*extendedIPv4)
 
 	upstreamURL, err := url.Parse(*upstream)
 	if err != nil {
@@ -343,8 +347,12 @@ func runProxy(args []string) error {
 		return fmt.Errorf("--upstream must use http or https, got scheme %q in %q", upstreamURL.Scheme, *upstream)
 	}
 
-	if !isLoopback(*listen) {
-		return fmt.Errorf("--listen %q is not a loopback address; refusing to bind; this proxy handles real client PII in transit and must never be reachable from the network", *listen)
+	exposed, err := checkListenAddr(*listen, *allowNonLoop)
+	if err != nil {
+		return err
+	}
+	if exposed {
+		logger.Warn(nonLoopbackWarning, "listen", *listen)
 	}
 
 	// CLI --disable entries are a one-off addition on top of whatever
@@ -417,6 +425,7 @@ func runProxy(args []string) error {
 		MaxConcurrent: *maxConcurrent,
 		Logger:        logger,
 		DebugLogger:   debugLogger,
+		AllowedHosts:  splitHostList(*allowHost),
 	})
 
 	httpServer := &http.Server{
@@ -471,6 +480,14 @@ func runProxy(args []string) error {
 		"upstream", upstreamURL.String(),
 	)
 	fmt.Fprintln(os.Stderr)
+	if exposed {
+		// Repeated here because the startup log line above scrolls away;
+		// this block is what an operator actually reads.
+		fmt.Fprintf(os.Stderr, "WARNING: listening on %s, which is reachable from the network (--allow-non-loopback).\n", ln.Addr().String())
+		fmt.Fprintln(os.Stderr, "Anyone who can reach this port can use the proxy and read this engagement's real")
+		fmt.Fprintln(os.Stderr, "values back out of it. Firewall the port, and stop the proxy when you are done.")
+		fmt.Fprintln(os.Stderr)
+	}
 	if projectAlreadyConfiguredFor(ln.Addr().String()) {
 		fmt.Fprintln(os.Stderr, "redactproxy is running. This folder's Claude Code is already configured to use it")
 		fmt.Fprintln(os.Stderr, "(.claude/settings.local.json), so just run `claude` here, no export needed.")
@@ -605,7 +622,19 @@ func rememberEngagement(name string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(cwd, engagementMarkerFile), []byte(name+"\n"), 0o600)
+	path := filepath.Join(cwd, engagementMarkerFile)
+	// The marker lives in whatever folder the operator happens to be in,
+	// which may be a repository somebody else prepared. os.WriteFile
+	// follows a symlink and truncates its target, so a marker planted as
+	// a link would turn a read-only command such as `rules show
+	// --engagement x` into an overwrite of any file the operator can
+	// write. Only a regular file, or nothing, is ever written over.
+	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
+		return fmt.Errorf("%s exists and is not a regular file; refusing to write through it", path)
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return os.WriteFile(path, []byte(name+"\n"), 0o600)
 }
 
 // resolveEngagement returns the engagement name to use for a
@@ -1072,6 +1101,45 @@ func checkMiBFlag(name string, mib, defaultMiB int64) error {
 		return fmt.Errorf("%s is too large, got %d (maximum %d); converting it to bytes overflows, which would silently fall back to the %d MiB default instead of erroring", name, mib, int64(maxMiBFlagValue), defaultMiB)
 	}
 	return nil
+}
+
+// splitHostList parses --allow-host: comma-separated names, blanks
+// dropped.
+func splitHostList(s string) []string {
+	var hosts []string
+	for h := range strings.SplitSeq(s, ",") {
+		if h = strings.TrimSpace(h); h != "" {
+			hosts = append(hosts, h)
+		}
+	}
+	return hosts
+}
+
+// nonLoopbackWarning is logged at startup when --allow-non-loopback lets
+// the proxy bind somewhere other than loopback.
+const nonLoopbackWarning = "--listen is not a loopback address: this proxy is reachable from the network and has no authentication. Anyone who can reach it can send requests through it, and since every response is detokenized, get this engagement's real values back. Only run it this way on a network you fully control, with the port firewalled"
+
+// checkListenAddr decides whether runProxy may bind listen. A loopback
+// address is always fine. Anything else -- a LAN IP, 0.0.0.0, or the
+// bare ":8787" shorthand that binds every interface (see isLoopback) --
+// is refused unless the operator passed --allow-non-loopback, in which
+// case exposed is true and the caller warns.
+//
+// Opt-in rather than forbidden outright: running Claude Code on one
+// machine (a VM, a container, a jump box) against a proxy on another is
+// a legitimate setup. But the risk is larger than "client data crosses
+// the network": the proxy has no authentication, and it detokenizes
+// every response, so any peer with an API key of its own can ask the
+// model to repeat placeholder values and read the real ones back. That
+// is why the flag is explicit, and the warning says so in those terms.
+func checkListenAddr(listen string, allowNonLoopback bool) (exposed bool, err error) {
+	if isLoopback(listen) {
+		return false, nil
+	}
+	if !allowNonLoopback {
+		return false, fmt.Errorf("--listen %q is not a loopback address; refusing to bind. This proxy handles real client data and has no authentication, so anyone who can reach it can read that data back. If you really need it reachable from another machine, pass --allow-non-loopback as well and read the warning it prints", listen)
+	}
+	return true, nil
 }
 
 // isLoopback reports whether addr (a --listen value) resolves to a

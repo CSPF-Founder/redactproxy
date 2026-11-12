@@ -380,6 +380,485 @@ func TestTokenize_UnrecognizedToolResultSubBlockType_FailsClosed(t *testing.T) {
 	}
 }
 
+// TestTokenize_ToolResultToolReference_PassesThrough is a regression
+// test: Claude Code's client-side tool search (ToolSearch) answers with
+// a tool_result whose content is tool_reference sub-blocks, and those
+// used to hit the unrecognized-type default, blocking every request
+// after the first deferred tool was loaded. The references must pass
+// through byte-for-byte (tool_name has to keep matching tools[]) while
+// real content elsewhere in the same message is still tokenized.
+func TestTokenize_ToolResultToolReference_PassesThrough(t *testing.T) {
+	in := []byte(`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"tool_reference","tool_name":"WebFetch"},{"type":"tool_reference","tool_name":"mcp__internal-db__query","cache_control":{"type":"ephemeral"}}]},{"type":"text","text":"now scan real-target.example"}]}]}`)
+	out, err := Tokenize(in, markTransform)
+	if err != nil {
+		t.Fatalf("expected tool_reference sub-blocks to be accepted, got: %v", err)
+	}
+	s := mustPretty(t, out)
+	for _, ref := range []string{
+		`{"type":"tool_reference","tool_name":"WebFetch"}`,
+		`{"type":"tool_reference","tool_name":"mcp__internal-db__query","cache_control":{"type":"ephemeral"}}`,
+	} {
+		if !strings.Contains(s, ref) {
+			t.Fatalf("tool_reference must pass through byte-for-byte, missing %s in: %s", ref, s)
+		}
+	}
+	if !strings.Contains(s, `"text":"TOK:now scan real-target.example"`) {
+		t.Fatalf("text alongside a tool_reference result not transformed: %s", s)
+	}
+}
+
+// TestTokenize_ToolReferenceWithUnexpectedField_FailsClosed pins the
+// limit on the pass-through above: it's justified only for the exact
+// tool_reference shape, so one carrying any other field must still
+// block rather than let that field's value reach the model untouched.
+func TestTokenize_ToolReferenceWithUnexpectedField_FailsClosed(t *testing.T) {
+	in := []byte(`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"tool_reference","tool_name":"WebFetch","description":"queries widgetcorp-secret.example"}]}]}]}`)
+	out, err := Tokenize(in, markTransform)
+	if err == nil {
+		t.Fatalf("expected a tool_reference with an unexpected field to fail closed, got output: %s", out)
+	}
+	if !strings.Contains(err.Error(), "tool_reference") || !strings.Contains(err.Error(), "description") {
+		t.Fatalf("expected the error to name the block type and the unexpected field, got: %v", err)
+	}
+}
+
+// TestTokenize_TopLevelToolReference_FailsClosed: tool_reference is
+// only accepted nested in a tool_result's content, where tool search
+// puts it, not as a message-level content block.
+func TestTokenize_TopLevelToolReference_FailsClosed(t *testing.T) {
+	in := []byte(`{"messages":[{"role":"user","content":[{"type":"tool_reference","tool_name":"WebFetch"}]}]}`)
+	if _, err := Tokenize(in, markTransform); err == nil || !strings.Contains(err.Error(), "tool_reference") {
+		t.Fatalf("expected a message-level tool_reference to fail closed, got err: %v", err)
+	}
+}
+
+// TestTokenize_MidConversationToolChanges_PassThrough covers the role
+// "system" message Claude Code sends when an MCP server connects or
+// disconnects mid-session: tool_removal / tool_addition blocks naming a
+// tool by reference or (additions only) by full definition. Like
+// tool_reference above, these used to fail closed as unrecognized and
+// block the rest of the session. References pass through byte-for-byte;
+// an MCP tool's inline definition has only its description text scanned
+// (see TestTokenize_ToolAddition_MCPDefinitionScanned), like its entry
+// in tools[]; a text block in the same message is scanned as usual.
+func TestTokenize_MidConversationToolChanges_PassThrough(t *testing.T) {
+	removal := `{"type":"tool_removal","tool":{"type":"tool_reference","name":"mcp__old__query"}}`
+	byRef := `{"type":"tool_addition","tool":{"type":"tool_reference","name":"mcp__internal-db__query"}}`
+	byValue := `{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"name":"mcp__internal-db__lookup","description":"Look up a host","input_schema":{"type":"object","properties":{"host":{"type":"string"}}}}},"cache_control":{"type":"ephemeral"}}`
+	in := []byte(`{"messages":[{"role":"user","content":"hi"},{"role":"system","content":[{"type":"text","text":"MCP server for real-target.example reconnected"},` + removal + `,` + byRef + `,` + byValue + `]}]}`)
+	out, err := Tokenize(in, markTransform)
+	if err != nil {
+		t.Fatalf("expected tool_addition/tool_removal blocks to be accepted, got: %v", err)
+	}
+	s := mustPretty(t, out)
+	byValueScanned := strings.Replace(byValue, `"description":"Look up a host"`, `"description":"TOK:Look up a host"`, 1)
+	for _, block := range []string{removal, byRef, byValueScanned} {
+		if !strings.Contains(s, block) {
+			t.Fatalf("tool change block changed beyond a definition's description, missing %s in: %s", block, s)
+		}
+	}
+	if !strings.Contains(s, `"text":"TOK:MCP server for real-target.example reconnected"`) {
+		t.Fatalf("text alongside tool change blocks not transformed: %s", s)
+	}
+}
+
+// TestTokenize_MidConversationToolChanges_UnexpectedShape_FailsClosed
+// pins the limit on the pass-through above, for each part of the shape
+// it's justified by.
+func TestTokenize_MidConversationToolChanges_UnexpectedShape_FailsClosed(t *testing.T) {
+	cases := map[string]string{
+		"extra field on block":         `{"type":"tool_addition","tool":{"type":"tool_reference","name":"q"},"note":"real-target.example"}`,
+		"extra field on reference":     `{"type":"tool_removal","tool":{"type":"tool_reference","name":"q","note":"real-target.example"}}`,
+		"extra field on definition":    `{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"name":"q"},"note":"real-target.example"}}`,
+		"definition in a removal":      `{"type":"tool_removal","tool":{"type":"tool_definition","definition":{"name":"q"}}}`,
+		"definition not an object":     `{"type":"tool_addition","tool":{"type":"tool_definition","definition":"real-target.example"}}`,
+		"unknown tool type":            `{"type":"tool_addition","tool":{"type":"some_future_tool_ref","name":"real-target.example"}}`,
+		"tool not an object":           `{"type":"tool_addition","tool":"real-target.example"}`,
+		"tool missing":                 `{"type":"tool_removal"}`,
+		"reference uses tool_name key": `{"type":"tool_removal","tool":{"type":"tool_reference","tool_name":"q"}}`,
+	}
+	for name, block := range cases {
+		t.Run(name, func(t *testing.T) {
+			in := []byte(`{"messages":[{"role":"system","content":[` + block + `]}]}`)
+			out, err := Tokenize(in, markTransform)
+			if err == nil {
+				t.Fatalf("expected fail closed, got output: %s", out)
+			}
+			if !strings.Contains(err.Error(), "tool_addition") && !strings.Contains(err.Error(), "tool_removal") {
+				t.Fatalf("expected the error to name the block type, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestTokenize_FallbackBlock_PassesThrough: after a server-side refusal
+// fallback switches models mid-response, the assistant turn Claude Code
+// echoes back can carry a fallback marker. It used to fail closed as
+// unrecognized; it must pass through byte-for-byte while the turn's text
+// is still scanned.
+func TestTokenize_FallbackBlock_PassesThrough(t *testing.T) {
+	fallback := `{"type":"fallback","from":{"model":"claude-fable-5-1"},"to":{"model":"claude-opus-4-8"}}`
+	in := []byte(`{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[` + fallback + `,{"type":"text","text":"scanning real-target.example"}]}]}`)
+	out, err := Tokenize(in, markTransform)
+	if err != nil {
+		t.Fatalf("expected a fallback block to be accepted, got: %v", err)
+	}
+	s := mustPretty(t, out)
+	if !strings.Contains(s, fallback) {
+		t.Fatalf("fallback block must pass through byte-for-byte: %s", s)
+	}
+	if !strings.Contains(s, `"text":"TOK:scanning real-target.example"`) {
+		t.Fatalf("text after a fallback block not transformed: %s", s)
+	}
+}
+
+// TestTokenize_FallbackBlock_UnexpectedShape_FailsClosed pins the limit
+// on the pass-through above.
+func TestTokenize_FallbackBlock_UnexpectedShape_FailsClosed(t *testing.T) {
+	cases := map[string]string{
+		"extra field on block":  `{"type":"fallback","from":{"model":"a"},"to":{"model":"b"},"note":"real-target.example"}`,
+		"extra field on from":   `{"type":"fallback","from":{"model":"a","note":"real-target.example"},"to":{"model":"b"}}`,
+		"to missing":            `{"type":"fallback","from":{"model":"a"}}`,
+		"model not a string":    `{"type":"fallback","from":{"model":{"x":"real-target.example"}},"to":{"model":"b"}}`,
+		"from not an object":    `{"type":"fallback","from":"real-target.example","to":{"model":"b"}}`,
+		"model missing from to": `{"type":"fallback","from":{"model":"a"},"to":{}}`,
+	}
+	for name, block := range cases {
+		t.Run(name, func(t *testing.T) {
+			in := []byte(`{"messages":[{"role":"assistant","content":[` + block + `]}]}`)
+			out, err := Tokenize(in, markTransform)
+			if err == nil {
+				t.Fatalf("expected fail closed, got output: %s", out)
+			}
+			if !strings.Contains(err.Error(), "fallback") {
+				t.Fatalf("expected the error to name the block type, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestDetokenize_FallbackBlock_RestOfResponseDetokenized: a
+// non-streaming response carrying a fallback marker must still have its
+// other blocks detokenized; the marker itself is left as-is.
+func TestDetokenize_FallbackBlock_RestOfResponseDetokenized(t *testing.T) {
+	in := []byte(`{"id":"msg_1","type":"message","role":"assistant","model":"claude-opus-4-8","content":[{"type":"fallback","from":{"model":"claude-fable-5-1"},"to":{"model":"claude-opus-4-8"}},{"type":"text","text":"found abc123.tok.internal"}]}`)
+	out := string(Detokenize(in, func(s string) string {
+		return strings.ReplaceAll(s, "abc123.tok.internal", "real-target.example")
+	}))
+	if !strings.Contains(out, `"text":"found real-target.example"`) {
+		t.Fatalf("text alongside a fallback block not detokenized: %s", out)
+	}
+	if !strings.Contains(out, `{"type":"fallback","from":{"model":"claude-fable-5-1"},"to":{"model":"claude-opus-4-8"}}`) {
+		t.Fatalf("fallback block changed: %s", out)
+	}
+}
+
+// TestTokenize_ToolResultSearchResult_Scanned: a local MCP search tool
+// (or Claude Code's web search with citations on) returns search_result
+// sub-blocks, which used to fail closed as unrecognized. Their source,
+// title and every text block must be scanned -- they're tool output like
+// any other -- while protocol fields stay untouched. Covers both
+// tool_result and mcp_tool_result, which share the sub-block routing.
+func TestTokenize_ToolResultSearchResult_Scanned(t *testing.T) {
+	for _, resultType := range []string{"tool_result", "mcp_tool_result"} {
+		t.Run(resultType, func(t *testing.T) {
+			in := []byte(`{"messages":[{"role":"user","content":[{"type":"` + resultType + `","tool_use_id":"toolu_1","content":[{"type":"search_result","source":"https://wiki.real-target.example/runbook","title":"real-target.example runbook","content":[{"type":"text","text":"db host is db01.real-target.example"},{"type":"text","text":"second snippet"}],"citations":{"enabled":true}}]}]}]}`)
+			out, err := Tokenize(in, markTransform)
+			if err != nil {
+				t.Fatalf("expected a search_result sub-block to be accepted, got: %v", err)
+			}
+			s := mustPretty(t, out)
+			for _, want := range []string{
+				`"source":"TOK:https://wiki.real-target.example/runbook"`,
+				`"title":"TOK:real-target.example runbook"`,
+				`"text":"TOK:db host is db01.real-target.example"`,
+				`"text":"TOK:second snippet"`,
+				`"citations":{"enabled":true}`,
+				`"tool_use_id":"toolu_1"`,
+			} {
+				if !strings.Contains(s, want) {
+					t.Fatalf("missing %s in: %s", want, s)
+				}
+			}
+		})
+	}
+}
+
+// TestTokenize_SearchResult_UnexpectedShape_FailsClosed: scanning a
+// search_result is complete only for the fields searchResultPaths knows,
+// so anything else must block rather than go out unscanned.
+func TestTokenize_SearchResult_UnexpectedShape_FailsClosed(t *testing.T) {
+	cases := map[string]string{
+		"extra field":                `{"type":"search_result","source":"s","title":"t","content":[],"snippet":"real-target.example"}`,
+		"source not a string":        `{"type":"search_result","source":{"url":"real-target.example"},"title":"t","content":[]}`,
+		"title missing":              `{"type":"search_result","source":"s","content":[]}`,
+		"content not an array":       `{"type":"search_result","source":"s","title":"t","content":"real-target.example"}`,
+		"non-text content block":     `{"type":"search_result","source":"s","title":"t","content":[{"type":"some_future_sub_block","data":"real-target.example"}]}`,
+		"extra field on text block":  `{"type":"search_result","source":"s","title":"t","content":[{"type":"text","text":"x","note":"real-target.example"}]}`,
+		"text not a string":          `{"type":"search_result","source":"s","title":"t","content":[{"type":"text","text":{"x":"real-target.example"}}]}`,
+		"extra field in citations":   `{"type":"search_result","source":"s","title":"t","content":[],"citations":{"enabled":true,"note":"real-target.example"}}`,
+		"citations.enabled a string": `{"type":"search_result","source":"s","title":"t","content":[],"citations":{"enabled":"real-target.example"}}`,
+	}
+	for name, block := range cases {
+		t.Run(name, func(t *testing.T) {
+			in := []byte(`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[` + block + `]}]}]}`)
+			out, err := Tokenize(in, markTransform)
+			if err == nil {
+				t.Fatalf("expected fail closed, got output: %s", out)
+			}
+			if !strings.Contains(err.Error(), "search_result") {
+				t.Fatalf("expected the error to name the block type, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestTokenize_MCPToolDefinitions_TextScanned: an MCP server's tool
+// description and the free text in its input schema are operator-written
+// and must be scanned, while everything structural -- and every built-in
+// tool -- is left exactly as sent.
+func TestTokenize_MCPToolDefinitions_TextScanned(t *testing.T) {
+	builtin := `{"name":"Artifact","description":"loads scripts only from cdn.real-target.example","input_schema":{"type":"object","properties":{"url":{"type":"string","description":"a real-target.example link"}}}}`
+	server := `{"type":"web_search_20250305","name":"web_search","allowed_domains":["real-target.example"]}`
+	mcp := `{"name":"mcp__db__query","description":"Query db01.real-target.example","input_schema":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","title":"real-target.example query","properties":{"description":{"type":"string","description":"free text about real-target.example","default":"real-target.example","pattern":"^real-target\\.example$"},"env":{"type":"string","enum":["prod.real-target.example","staging"],"examples":[{"host":"a.real-target.example"}]},"rows":{"type":"array","items":{"type":"object","properties":{"host":{"const":"b.real-target.example","format":"hostname"}}}},"mode":{"anyOf":[{"type":"string","description":"c.real-target.example"},{"type":"null"}]}},"required":["description","env"],"additionalProperties":false},"defer_loading":true,"cache_control":{"type":"ephemeral"}}`
+	in := []byte(`{"model":"m","tools":[` + builtin + `,` + server + `,` + mcp + `],"messages":[]}`)
+	out, err := Tokenize(in, markTransform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := mustPretty(t, out)
+	for _, want := range []string{
+		builtin,
+		server,
+		`"name":"mcp__db__query","description":"TOK:Query db01.real-target.example"`,
+		`"$schema":"https://json-schema.org/draft/2020-12/schema"`,
+		`"title":"TOK:real-target.example query"`,
+		`"properties":{"description":{"type":"string","description":"TOK:free text about real-target.example","default":"TOK:real-target.example","pattern":"^real-target\\.example$"}`,
+		`"enum":["TOK:prod.real-target.example","TOK:staging"]`,
+		`"examples":[{"host":"TOK:a.real-target.example"}]`,
+		`"const":"TOK:b.real-target.example","format":"hostname"`,
+		`"anyOf":[{"type":"string","description":"TOK:c.real-target.example"},{"type":"null"}]`,
+		`"required":["description","env"],"additionalProperties":false`,
+		`"defer_loading":true,"cache_control":{"type":"ephemeral"}`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("missing %s in: %s", want, s)
+		}
+	}
+}
+
+// TestTokenize_ToolAddition_MCPDefinitionScanned: an MCP tool defined
+// mid-conversation carries the same text as one in "tools", and gets the
+// same scan; a built-in tool's definition does not.
+func TestTokenize_ToolAddition_MCPDefinitionScanned(t *testing.T) {
+	block := func(name string) string {
+		return `{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"name":"` + name + `","description":"Ping gw.real-target.example","input_schema":{"type":"object","properties":{"host":{"type":"string","default":"gw.real-target.example"}}}}}}`
+	}
+	in := []byte(`{"messages":[{"role":"user","content":[` + block("mcp__net__ping") + `,` + block("Ping") + `]}]}`)
+	out, err := Tokenize(in, markTransform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := mustPretty(t, out)
+	if !strings.Contains(s, `"name":"mcp__net__ping","description":"TOK:Ping gw.real-target.example","input_schema":{"type":"object","properties":{"host":{"type":"string","default":"TOK:gw.real-target.example"}}}`) {
+		t.Fatalf("MCP tool_definition not scanned: %s", s)
+	}
+	if !strings.Contains(s, block("Ping")) {
+		t.Fatalf("built-in tool_definition must pass through unchanged: %s", s)
+	}
+}
+
+// TestTokenize_BatchRequests_EachParamsScanned: a create-batch body
+// carries one ordinary Messages request per entry under
+// requests[].params; each is scanned exactly like a top-level request,
+// and an unrecognized block type in any of them still fails closed.
+func TestTokenize_BatchRequests_EachParamsScanned(t *testing.T) {
+	in := []byte(`{"requests":[{"custom_id":"real-target.example-1","params":{"model":"m","system":"sys real-target.example","messages":[{"role":"user","content":"scan real-target.example"}]}},{"custom_id":"b","params":{"model":"m","tools":[{"name":"mcp__db__q","description":"db01.real-target.example"}],"messages":[{"role":"user","content":[{"type":"text","text":"second real-target.example"},{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ping real-target.example"}}]}]}}]}`)
+	out, err := Tokenize(in, markTransform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := mustPretty(t, out)
+	for _, want := range []string{
+		`"custom_id":"real-target.example-1"`,
+		`"system":"sys real-target.example"`,
+		`"content":"TOK:scan real-target.example"`,
+		`"description":"TOK:db01.real-target.example"`,
+		`"text":"TOK:second real-target.example"`,
+		`"input":{"TOK:command":"TOK:ping real-target.example"}`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("missing %s in: %s", want, s)
+		}
+	}
+
+	unknown := []byte(`{"requests":[{"custom_id":"a","params":{"messages":[{"role":"user","content":[{"type":"some_future_block","data":"real-target.example"}]}]}}]}`)
+	if _, err := Tokenize(unknown, markTransform); err == nil || !strings.Contains(err.Error(), "some_future_block") {
+		t.Fatalf("expected an unknown block inside a batch entry to fail closed, got: %v", err)
+	}
+}
+
+// TestDetokenize_BatchResultLine: one line of a batch's results wraps an
+// ordinary response message under result.message.
+func TestDetokenize_BatchResultLine(t *testing.T) {
+	in := []byte(`{"custom_id":"a","result":{"type":"succeeded","message":{"id":"msg_1","role":"assistant","content":[{"type":"text","text":"TOKEN"}]}}}`)
+	out := Detokenize(in, func(s string) string { return strings.ReplaceAll(s, "TOKEN", "real-target.example") })
+	if !strings.Contains(string(out), `"text":"real-target.example"`) {
+		t.Fatalf("batch result line not detokenized: %s", out)
+	}
+}
+
+// TestTokenize_EnvironmentContext_GitStatusScanned: the gitStatus
+// section (branch, git user, changed files, recent commit subjects) is
+// scanned, while the userEmail section before it and the fixed trailer
+// after it reach the transform as part of nothing: they stay byte for
+// byte as sent.
+func TestTokenize_EnvironmentContext_GitStatusScanned(t *testing.T) {
+	email := "# userEmail\nThe user's email address is operator@internal-harness.example.\n"
+	git := "# gitStatus\nCurrent branch: real-target.example-pentest\n\nRecent commits:\n0029d87 Notes for 10.20.30.45\n"
+	in, _ := json.Marshal(map[string]any{"messages": []map[string]any{{"role": "user", "content": []map[string]any{
+		{"type": "text", "text": "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n" + email + git + "</system-reminder>\n"},
+	}}}})
+	var scanned []string
+	out, err := Tokenize(in, func(s string) (string, error) {
+		scanned = append(scanned, s)
+		return strings.ReplaceAll(s, "real-target.example", "TOK"), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := gjson.GetBytes(out, "messages.0.content.0.text").String()
+	if !strings.Contains(text, "Current branch: TOK-pentest") {
+		t.Fatalf("gitStatus section not scanned: %q", text)
+	}
+	if !strings.Contains(text, email) {
+		t.Fatalf("userEmail section changed: %q", text)
+	}
+	for _, s := range scanned {
+		if strings.Contains(s, "operator@internal-harness.example") {
+			t.Fatalf("userEmail section reached the transform: %q", s)
+		}
+	}
+}
+
+// TestTokenize_Safeguards_ContextScanned: auto mode's "safeguards"
+// field repeats the working directory, git remote and permission rules
+// the conversation already carries tokenized; every string in it must be
+// scanned too, except the type tags and the tool_use IDs that tie a
+// prior turn's context to its blocks in "messages".
+func TestTokenize_Safeguards_ContextScanned(t *testing.T) {
+	in := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}],"safeguards":[{"type":"dangerous_tool_use","classifier_context":{"v":1,"permission_mode":"auto","live_cwd":"/home/u/real-target.example","git_state":{"visibility":{"origin":{"host":"git.real-target.example","remote":"acme/payroll","visibility":"private"}},"status":{"clean":false,"counts":{"staged":0}}},"rules":{"allow":[{"rule":"Bash(curl https://portal.real-target.example/*)","source":"localSettings"}]},"auto_mode":{"environment":["vpn.real-target.example"]},"prior_turn_context":[{"tool_use_ids":["toolu_01ABC"],"context":{"live_cwd":"/home/u/real-target.example","type":"snapshot"}}],"restricted":false,"some_future_field":{"note":"10.20.30.40"}}}]}`)
+	out, err := Tokenize(in, markTransform)
+	if err != nil {
+		t.Fatalf("expected a safeguards field to be accepted, got: %v", err)
+	}
+	s := mustPretty(t, out)
+	for _, want := range []string{
+		`"live_cwd":"TOK:/home/u/real-target.example"`,
+		`"host":"TOK:git.real-target.example"`,
+		`"remote":"TOK:acme/payroll"`,
+		`"rule":"TOK:Bash(curl https://portal.real-target.example/*)"`,
+		`"environment":["TOK:vpn.real-target.example"]`,
+		`"context":{"live_cwd":"TOK:/home/u/real-target.example","type":"snapshot"}`,
+		`"note":"TOK:10.20.30.40"`,
+		`"type":"dangerous_tool_use"`,
+		`"tool_use_ids":["toolu_01ABC"]`,
+		`"v":1`,
+		`"restricted":false`,
+		`"counts":{"staged":0}`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("missing %s in: %s", want, s)
+		}
+	}
+	if gjson.GetBytes(out, "safeguards.0.classifier_context|@keys").Raw != gjson.GetBytes(in, "safeguards.0.classifier_context|@keys").Raw {
+		t.Fatalf("classifier_context key order changed: %s", s)
+	}
+
+	// Response bodies never carry the field, but the walk is shared, so a
+	// body without it must come out exactly as before.
+	plain := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+	if out, err := Tokenize(plain, func(s string) (string, error) { return s, nil }); err != nil || string(out) != string(plain) {
+		t.Fatalf("body without safeguards changed: %s, %v", out, err)
+	}
+}
+
+// TestTokenize_Safeguards_TransformErrorFailsClosed: a scan failure
+// inside safeguards blocks the request like one anywhere else.
+func TestTokenize_Safeguards_TransformErrorFailsClosed(t *testing.T) {
+	in := []byte(`{"messages":[],"safeguards":[{"type":"dangerous_tool_use","classifier_context":{"live_cwd":"/x"}}]}`)
+	boom := errors.New("boom")
+	_, err := Tokenize(in, func(string) (string, error) { return "", boom })
+	if !errors.Is(err, boom) {
+		t.Fatalf("expected the transform error, got: %v", err)
+	}
+}
+
+// TestTokenize_CompactionBlock_NeverTouched: a server-side compaction
+// block is signed, so like a thinking block it must go back
+// byte-for-byte -- even when its summary contains a value a detector
+// would otherwise match -- while the turns after it are still scanned.
+// It used to fail closed as unrecognized.
+func TestTokenize_CompactionBlock_NeverTouched(t *testing.T) {
+	compaction := `{"type":"compaction","content":"Summary: the user is assessing real-target.example","encrypted_content":"EqQBCkgIARABGAIiQHg","tool_changes":[{"type":"tool_addition","tool":{"type":"tool_reference","name":"mcp__db__query"}}]}`
+	in := []byte(`{"messages":[{"role":"assistant","content":[` + compaction + `]},{"role":"user","content":"now check real-target.example"}]}`)
+	out, err := Tokenize(in, markTransform)
+	if err != nil {
+		t.Fatalf("expected a compaction block to be accepted, got: %v", err)
+	}
+	s := mustPretty(t, out)
+	if !strings.Contains(s, compaction) {
+		t.Fatalf("compaction block must pass through byte-for-byte: %s", s)
+	}
+	if !strings.Contains(s, `"content":"TOK:now check real-target.example"`) {
+		t.Fatalf("message after a compaction block not transformed: %s", s)
+	}
+
+	nullContent := []byte(`{"messages":[{"role":"assistant","content":[{"type":"compaction","content":null}]}]}`)
+	if _, err := Tokenize(nullContent, markTransform); err != nil {
+		t.Fatalf("expected a compaction block with null content to be accepted, got: %v", err)
+	}
+}
+
+// TestTokenize_CompactionBlock_UnexpectedShape_FailsClosed pins the
+// limit on the pass-through above.
+func TestTokenize_CompactionBlock_UnexpectedShape_FailsClosed(t *testing.T) {
+	cases := map[string]string{
+		"extra field":                    `{"type":"compaction","content":"s","note":"real-target.example"}`,
+		"content not a string":           `{"type":"compaction","content":{"text":"real-target.example"}}`,
+		"encrypted_content not a string": `{"type":"compaction","content":"s","encrypted_content":["real-target.example"]}`,
+		"tool_changes not an array":      `{"type":"compaction","content":"s","tool_changes":{"type":"tool_addition"}}`,
+		"tool_changes unknown entry":     `{"type":"compaction","content":"s","tool_changes":[{"type":"text","text":"real-target.example"}]}`,
+		"tool_changes bad shape":         `{"type":"compaction","content":"s","tool_changes":[{"type":"tool_removal","tool":{"type":"tool_reference","name":"q","note":"real-target.example"}}]}`,
+	}
+	for name, block := range cases {
+		t.Run(name, func(t *testing.T) {
+			in := []byte(`{"messages":[{"role":"assistant","content":[` + block + `]}]}`)
+			out, err := Tokenize(in, markTransform)
+			if err == nil {
+				t.Fatalf("expected fail closed, got output: %s", out)
+			}
+			if !strings.Contains(err.Error(), "compaction") {
+				t.Fatalf("expected the error to name the block type, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestDetokenize_CompactionBlock_LeftAsIs: in a response, the signed
+// compaction block must reach the client unchanged (it has to echo the
+// exact bytes back), even if its summary contains a token.
+func TestDetokenize_CompactionBlock_LeftAsIs(t *testing.T) {
+	compaction := `{"type":"compaction","content":"Summary mentions abc123.tok.internal"}`
+	in := []byte(`{"id":"msg_1","type":"message","role":"assistant","content":[` + compaction + `]}`)
+	out := Detokenize(in, func(s string) string {
+		return strings.ReplaceAll(s, "abc123.tok.internal", "real-target.example")
+	})
+	if string(out) != string(in) {
+		t.Fatalf("compaction block changed on detokenize: %s", out)
+	}
+}
+
 // TestDetokenize_UnrecognizedContentBlockType_StillFailsOpen confirms
 // Tokenize's new fail-closed behavior for an unrecognized block type
 // does NOT change Detokenize's own, deliberately different, fail-open

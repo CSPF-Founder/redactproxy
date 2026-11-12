@@ -29,6 +29,7 @@ import (
 // path.
 type Engine struct {
 	store         *tokenstore.Store
+	known         knownValues
 	detectors     atomic.Pointer[[]Detector]
 	allowPatterns atomic.Pointer[[]*regexp.Regexp]
 	debug         atomic.Pointer[debuglog.Logger]
@@ -139,7 +140,15 @@ func (e *Engine) Tokenize(text string) (string, error) {
 	// result look stale to LATER lookups (a wasted cache slot, safe),
 	// never cause it to be miscategorized as valid for a generation it
 	// wasn't actually computed under (unsafe).
-	gen := e.gen.Load()
+	//
+	// The store's delete count is folded in for the same reason: after
+	// `tokens remove` (the running proxy's console does this live) a
+	// cached output can hold a token whose mapping is gone. Both counters
+	// only grow, so their sum identifies a configuration-and-store state
+	// no earlier entry can share. So does the label-only version (see
+	// knownValueDetections): text cached before a secret became known
+	// must be scanned again for it.
+	gen := e.gen.Load() + e.store.DeleteCount() + e.store.LabelOnlyVersion()
 	if cached, ok := e.cache.get(text, gen); ok {
 		return cached, nil
 	}
@@ -166,6 +175,7 @@ func (e *Engine) Tokenize(text string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	dets = append(dets, e.knownValueDetections(text)...)
 	dets = e.filterAllowed(dets)
 	dets = e.filterAlreadyTokenized(dets, text)
 	dets = resolveOverlaps(dets)
@@ -666,6 +676,7 @@ var tokenPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\b` + regexp.QuoteMeta(tokenstore.TokenPasswordHashPrefix) + `[0-9a-f]{48}`),
 	regexp.MustCompile(`\b` + regexp.QuoteMeta(tokenstore.TokenADMachineAccountPrefix) + `[0-9a-f]{12}\$`),
 	regexp.MustCompile(regexp.QuoteMeta(tokenstore.TokenGPPCPasswordPrefix) + `[0-9a-f]{48}`),
+	regexp.MustCompile(regexp.QuoteMeta(tokenstore.TokenPasswordPrefix) + `[0-9a-f]{24}`),
 }
 
 // wrapDetokenizeBoundary rewrites one tokenPatterns entry's source into
@@ -761,7 +772,13 @@ var intlPhoneTokenRe = regexp.MustCompile(`\+\d{1,3}-` + regexp.QuoteMeta(tokens
 // host octet's exact width (1-3 digits) is always present in the match
 // itself, unlike the domain case, so no separate lookup-then-lookahead
 // step is needed here.
-var ipNetworkTokenRe = regexp.MustCompile(regexp.QuoteMeta(tokenstore.TokenIPNetworkPrefix) + `(\d{1,3})\.(\d{1,3})\b`)
+//
+// Group 1 is the network token as stored, in any of its three ranges
+// (see tokenstore.ipNetworkToken): "198.18.<n>", "198.19.<n>" or
+// "240.<a>.<b>". Group 2 is the host octet.
+var ipNetworkTokenRe = regexp.MustCompile(`\b((?:` +
+	regexp.QuoteMeta(tokenstore.TokenIPNetworkPrefix) + `|` + regexp.QuoteMeta(tokenstore.TokenIPNetworkPrefix2) + `)\d{1,3}|` +
+	regexp.QuoteMeta(tokenstore.TokenIPNetworkOverflowPrefix) + `\d{1,3}\.\d{1,3})\.(\d{1,3})\b`)
 
 // ipv6TokenCandidateRe finds anything starting with the fixed IPv6 token
 // prefix and greedily consumes the rest of a plausible address. Unlike
@@ -839,7 +856,7 @@ func (e *Engine) detokenizeEmailLocalTokens(text string, dbg *debuglog.Logger) s
 func (e *Engine) detokenizeIPv4Tokens(text string, dbg *debuglog.Logger) string {
 	return ipNetworkTokenRe.ReplaceAllStringFunc(text, func(m string) string {
 		sub := ipNetworkTokenRe.FindStringSubmatch(m)
-		netToken := tokenstore.TokenIPNetworkPrefix + sub[1]
+		netToken := sub[1]
 		if realNet, ok := e.store.LookupReal(netToken); ok {
 			real := realNet + "." + sub[2]
 			dbg.Replacement("detokenize", "ip_network", real, m)

@@ -12,7 +12,8 @@ Your tool calls still run against real infrastructure.
 
 It rewrites API traffic and nothing else. No added prompts, no tool
 restrictions, no change to how Claude Code behaves. It listens on
-loopback and refuses to start on any other address. There is no
+loopback only, and refuses any other address unless you explicitly pass
+`--allow-non-loopback`. There is no
 telemetry, no sync, and no backup: everything it stores stays on the
 machine you run it on.
 

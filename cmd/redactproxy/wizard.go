@@ -37,6 +37,7 @@ func runWizard(args []string) error {
 	engagementFlag := fs.String("engagement", "", "engagement name (interactive picker if omitted and this folder has no marker yet; see .redactproxy-engagement)")
 	dataDir := fs.String("data-dir", "", "base directory for engagement data (default: $HOME/.redactproxy)")
 	listen := fs.String("listen", defaultListenAddr, "address the proxy will listen on; used to pre-configure this folder's Claude Code settings, must match what you actually start redactproxy with")
+	promptReminder := fs.Bool("prompt-reminder", false, "add the per-prompt reminder without asking: a Claude Code hook in this folder's settings that repeats a one-line reminder of the placeholder rules on every prompt. Helps in long sessions, where the CLAUDE.md note is far back in the conversation; costs about 60 words of input per prompt. Without this flag the wizard asks")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -194,6 +195,7 @@ func runWizard(args []string) error {
 	wroteMemory := offerClaudeMemory(reader, cwd)
 	fmt.Println()
 	wroteSettings := offerProjectSettings(reader, cwd, *listen, debugLogPath, providerEnv, removeEnvKeys)
+	offerPromptReminder(reader, filepath.Join(cwd, ".claude", "settings.local.json"), wroteSettings, *promptReminder)
 
 	fmt.Println()
 	fmt.Println("Next: start the proxy:")
@@ -915,6 +917,92 @@ func offerProjectSettings(r *bufio.Reader, cwd, listen, debugLogPath string, pro
 	}
 	fmt.Printf("wrote %s\n", settingsPath)
 	return true
+}
+
+// offerPromptReminder adds the reminder hook when the operator asked for
+// it with --prompt-reminder, and otherwise asks, defaulting to no since
+// the hook costs input on every prompt. There is nothing to add it to
+// unless the settings file was just written, and nothing to ask when the
+// hook is already there.
+func offerPromptReminder(r *bufio.Reader, settingsPath string, wroteSettings, preAnswered bool) {
+	if !wroteSettings {
+		if preAnswered {
+			fmt.Println("--prompt-reminder: skipped, because this folder's Claude Code settings were not written")
+		}
+		return
+	}
+	if data, err := os.ReadFile(settingsPath); err == nil && strings.Contains(string(data), promptReminderMarker) && !preAnswered {
+		fmt.Println("the per-prompt placeholder reminder is already set up in this folder, left unchanged")
+		return
+	}
+	if !preAnswered {
+		fmt.Println()
+		fmt.Println("Optional: a per-prompt reminder. In a long session Claude can drift from the")
+		fmt.Println("CLAUDE.md note (retyping a placeholder wrongly, commenting on fake IP ranges).")
+		fmt.Println("This adds a one-line reminder of the rules to every prompt you send. It costs")
+		fmt.Println("about 60 words of input per prompt, and you can remove it from the settings later.")
+		if !promptYesNo(r, "Add the per-prompt reminder?", false) {
+			return
+		}
+	}
+	if err := addPromptReminderHook(settingsPath); err != nil {
+		fmt.Printf("could not add the reminder hook to %s: %v\n", settingsPath, err)
+		return
+	}
+	fmt.Printf("added the per-prompt reminder hook to %s\n", settingsPath)
+}
+
+// promptReminderMarker identifies this tool's own hook entry, so adding
+// it twice replaces it instead of stacking a second copy.
+const promptReminderMarker = "[redactproxy]"
+
+// promptReminderText is what the hook prints into the conversation on
+// every prompt: the CLAUDE.md note's rules in one line. Deliberately
+// free of quote characters, since it is embedded in a shell command, and
+// of anything shaped like a real value.
+const promptReminderText = promptReminderMarker + " Reminder: strings such as tok followed by hex, 198.18.x.x addresses, and FAKE or tok- prefixed keys are placeholders for real client values. Copy each one exactly as last seen, treat it as the real thing, and do not comment on, decode or try to recover what is behind it. Full rules: the redactproxy section of CLAUDE.md."
+
+// addPromptReminderHook adds a UserPromptSubmit hook to the Claude Code
+// settings file at path that echoes promptReminderText. Claude Code
+// adds a UserPromptSubmit hook's output to the conversation, so the
+// rules are restated next to every new prompt instead of only once at
+// the top, which is where a long session loses them. Opt-in: it costs
+// tokens on every turn. Other hooks in the file are left as they are.
+func addPromptReminderHook(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	settings := map[string]any{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return fmt.Errorf("not valid JSON: %w", err)
+	}
+	hooks, _ := settings["hooks"].(map[string]any)
+	if hooks == nil {
+		hooks = map[string]any{}
+	}
+	entries, _ := hooks["UserPromptSubmit"].([]any)
+	kept := make([]any, 0, len(entries)+1)
+	for _, entry := range entries {
+		if raw, err := json.Marshal(entry); err == nil && strings.Contains(string(raw), promptReminderMarker) {
+			continue // an earlier copy of this hook; replaced below
+		}
+		kept = append(kept, entry)
+	}
+	kept = append(kept, map[string]any{
+		"hooks": []any{map[string]any{
+			"type":    "command",
+			"command": "echo '" + promptReminderText + "'",
+		}},
+	})
+	hooks["UserPromptSubmit"] = kept
+	settings["hooks"] = hooks
+
+	out, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(out, '\n'), 0o600)
 }
 
 // promptForEngagement interactively resolves the engagement name when

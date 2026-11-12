@@ -41,9 +41,17 @@ reaches a third party, not to withhold anything from the operator.
 1. **The host is trusted.** Real values live on it, in `tokens.db` and
    in Claude Code's own transcripts. Compromise of the host defeats
    everything here.
-2. **Loopback is trusted.** The proxy binds loopback only and refuses to
-   start on any other address, including the bare `:8787` shorthand. Any
-   local process that can reach the port can send it traffic.
+2. **Loopback is trusted.** By default the proxy binds loopback only and
+   refuses to start on any other address, including the bare `:8787`
+   shorthand. Any local process that can reach the port can send it
+   traffic. A web page in your browser is not such a process: requests
+   whose `Host` is a DNS name you did not list with `--allow-host`, or
+   that carry a foreign `Origin`, are refused, which closes DNS
+   rebinding and cross-origin requests. `--allow-non-loopback` lifts the restriction, and with it
+   this assumption: the proxy has no authentication and detokenizes
+   every response, so every host that can reach the port is then as
+   trusted as a local process. The flag logs a warning for that reason,
+   and running with it means you take on securing the network path.
 3. **The upstream connection is TLS.** The proxy terminates TLS to the
    upstream. A vulnerability in Go's `net/http` or `crypto/tls` is
    treated as a finding about this tool, which is why `go.mod` pins a
@@ -115,6 +123,6 @@ tracker](https://github.com/CSPF-Founder/redactproxy/issues), described
 by the shape of the value rather than the value itself.
 [SECURITY.md](https://github.com/CSPF-Founder/redactproxy/blob/main/SECURITY.md)
 lists what to report privately instead: findings where the proxy itself
-is the way in, such as code execution from a body it parses, an escape
-from the loopback bind, or another local process reading real values
-back out of it.
+is the way in, such as code execution from a body it parses, a way to
+bind beyond loopback without `--allow-non-loopback`, or another local
+process reading real values back out of it.

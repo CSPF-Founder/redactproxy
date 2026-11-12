@@ -22,8 +22,9 @@ that stays the same every time it sees it.
 
 That is all redactproxy does. It rewrites the API traffic and nothing
 else: no added prompts, no tool restrictions, no change to how Claude
-Code behaves. It listens on loopback and refuses to start on any other
-address.
+Code behaves. It listens on loopback only, and refuses any other address
+unless you explicitly pass `--allow-non-loopback` (see [Listening beyond
+loopback](#listening-beyond-loopback)).
 
 ## How it works
 
@@ -203,11 +204,16 @@ You can type the same things into a running proxy's terminal (`show`,
 `remove <value>`, `rules ...`, `help`) if you'd rather not interrupt a
 session to fix a mapping.
 
-Rule changes only affect text tokenized from that point on. Adding a
-`block` rule won't scrub a value that already reached the model earlier
-in the same conversation, so start a fresh one if that matters.
-Disabling a category likewise only gates future detection; anything
-already tokenized keeps detokenizing correctly.
+Rule changes apply to everything sent from then on, including the
+earlier turns Claude Code resends with every request, because the proxy
+re-redacts the whole history each time. That cuts both ways. A new
+`block` rule scrubs the value from every later request, but can't recall
+the requests that already carried it, so start a fresh conversation if
+that matters. And disabling a category or adding an `allow` entry
+un-redacts too: the next request sends those earlier values in the
+clear, even if they were tokenized before. Change those before a
+conversation starts, not in the middle of one. See [Where rules do and
+don't reach back](https://cspf-founder.github.io/redactproxy/security/gaps.html#where-rules-do-and-dont-reach-back).
 
 ### Blocking a domain
 
@@ -288,11 +294,41 @@ engagement on its own `--listen` address and point each Claude Code
 session at the matching port. One process serves exactly one
 engagement.
 
+## Listening beyond loopback
+
+By default `--listen` must be a loopback address (`127.0.0.1`, `::1`,
+`localhost`), and anything else, including the bare `:8787` shorthand
+that binds every interface, is refused. If Claude Code genuinely runs on
+a different machine (a VM, a container, a jump box), add
+`--allow-non-loopback`:
+
+```bash
+redactproxy --listen 10.0.5.20:8787 --allow-non-loopback
+```
+
+Read the warning it prints before you rely on this. The proxy has **no
+authentication**, and it detokenizes every response, so anyone who can
+reach the port and has an API key of their own can send requests through
+it and get this engagement's real values back. Use it only on a network
+you fully control, firewall the port to the one machine that needs it,
+and stop the proxy when you are done.
+
+If that machine reaches the proxy by DNS name rather than by IP address,
+also list the name with `--allow-host`, for example
+`--allow-host buildbox.lan`. Requests addressed to any other name are
+refused.
+
 ## What this doesn't protect
 
 Detection is regex-based and only ever sees request and response
 bodies. Known gaps:
 
+- PDFs and images. Claude Code sends them to the API as files, and the
+  proxy can't redact inside one. Extract the text locally and have
+  Claude read that.
+- Custom agent prompts, output styles and `--append-system-prompt`.
+  They travel in the `system` field, which is never scanned, so keep
+  client details out of them.
 - Encoded data. A `.env` piped through `base64`, an `xxd` dump,
   Terraform state: all of it goes straight through. Decode it locally
   and look first.
@@ -301,9 +337,10 @@ bodies. Known gaps:
 - Bare apex domains on file-extension TLDs (`.do`, `.ai`, `.rs`, `.sh`,
   `.py` and friends), since `main.rs` and `logo.ai` are far more often
   filenames. Use `rules block --domain` for those.
-- Your folder name. Claude Code puts the working directory in the
-  `system` field, which is never scanned, so don't name an engagement
-  folder after the client. redactproxy warns about it but can't fix it.
+- Your folder name. Claude Code puts a name derived from the working
+  directory in the `system` field, which is never scanned, so don't name
+  an engagement folder after the client. redactproxy warns about it but
+  can't fix it.
 - `thinking` blocks, which are signed by the API and so can't be
   rewritten. If a real value leaks some other way, the model can
   restate it there permanently. Start a new conversation.

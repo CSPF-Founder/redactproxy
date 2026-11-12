@@ -3,6 +3,7 @@ package redact
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -349,5 +350,132 @@ func TestTokenize_NoFalsePositiveOnPlainProse(t *testing.T) {
 	}
 	if out != in {
 		t.Fatalf("plain prose with no PII was modified: %q", out)
+	}
+}
+
+// TestEngine_TokenRemoval_InvalidatesTokenizeCache: removing a mapping
+// (the live console's `remove`) must not leave the old token being
+// served from the tokenize cache. That token no longer detokenizes, so
+// a reply echoing it would reach the operator unrestored.
+func TestEngine_TokenRemoval_InvalidatesTokenizeCache(t *testing.T) {
+	e, store := newTestEngine(t)
+	const in = "scan widgetcorp-fixture.com now"
+	first, err := e.Tokenize(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := store.Delete("widgetcorp-fixture.com"); err != nil || !removed {
+		t.Fatalf("delete: removed=%v err=%v", removed, err)
+	}
+	second, err := e.Tokenize(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second == first {
+		t.Fatalf("stale cached output served after the mapping was removed: %q", second)
+	}
+	if got := e.Detokenize(second); got != in {
+		t.Fatalf("output after removal does not round-trip: %q -> %q", second, got)
+	}
+}
+
+// TestEngine_IPv4Networks_ThreeRangesRoundTrip mints past both range
+// boundaries (network 257 moves to 198.19., network 513 to 240.) and
+// checks an address in each range tokenizes into that range, keeps its
+// host octet, and detokenizes back, including when it is re-sent.
+func TestEngine_IPv4Networks_ThreeRangesRoundTrip(t *testing.T) {
+	e, store := newTestEngine(t)
+	store.SetExtendedIPv4Pool(true)
+	real := func(i int) string { return fmt.Sprintf("10.%d.%d", i/256, i%256) }
+	for i := 0; i < 520; i++ {
+		if _, err := store.GetOrCreateToken(real(i), tokenstore.EntityIPNetwork); err != nil {
+			t.Fatalf("mint #%d: %v", i, err)
+		}
+	}
+	cases := map[int]string{0: "198.18.0.77", 255: "198.18.255.77", 256: "198.19.0.77", 511: "198.19.255.77", 512: "240.0.0.77", 519: "240.0.7.77"}
+	for i, want := range cases {
+		in := "host " + real(i) + ".77 is up"
+		out, err := e.Tokenize(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out != "host "+want+" is up" {
+			t.Errorf("network #%d: got %q, want token %s", i, out, want)
+		}
+		if back := e.Detokenize(out); back != in {
+			t.Errorf("network #%d: %q detokenized to %q", i, out, back)
+		}
+		if again, _ := e.Tokenize(out); again != out {
+			t.Errorf("network #%d: a token was tokenized again: %q -> %q", i, out, again)
+		}
+	}
+}
+
+// TestEngine_IPv4PlaceholderRanges_LeftAlone: an address in a range
+// tokens are minted from is never treated as a real value, and one that
+// matches no minted token passes through detokenize unchanged.
+func TestEngine_IPv4PlaceholderRanges_LeftAlone(t *testing.T) {
+	e, _ := newTestEngine(t)
+	for _, in := range []string{"probe 198.18.9.1", "probe 198.19.200.4", "probe 240.1.2.3", "probe 240.255.255.254"} {
+		out, err := e.Tokenize(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out != in || e.Detokenize(out) != in {
+			t.Errorf("%q: tokenized to %q, detokenized to %q", in, out, e.Detokenize(out))
+		}
+	}
+	// Neighbouring real ranges are still redacted.
+	for _, in := range []string{"probe 198.17.9.1", "probe 198.20.0.4", "probe 239.1.2.3", "probe 241.1.2.3"} {
+		if out, _ := e.Tokenize(in); out == in {
+			t.Errorf("%q: expected a real address just outside the token ranges to be redacted", in)
+		}
+	}
+}
+
+// TestEngine_IPv4Networks_DefaultPoolFailsClosedThenExtends: without the
+// extended pool the 513th network is refused (and the request with it),
+// naming the flag. Switching the pool on continues at the very next
+// slot, and switching it off again leaves every stored token, 240.x
+// included, resolving in both directions while new networks are refused.
+func TestEngine_IPv4Networks_DefaultPoolFailsClosedThenExtends(t *testing.T) {
+	e, store := newTestEngine(t)
+	real := func(i int) string { return fmt.Sprintf("10.%d.%d", i/256, i%256) }
+	for i := 0; i < int(tokenstore.DefaultIPNetworks); i++ {
+		tok, err := store.GetOrCreateToken(real(i), tokenstore.EntityIPNetwork)
+		if err != nil {
+			t.Fatalf("mint #%d: %v", i, err)
+		}
+		if !strings.HasPrefix(tok, "198.18.") && !strings.HasPrefix(tok, "198.19.") {
+			t.Fatalf("network #%d got %q, outside 198.18.0.0/15", i, tok)
+		}
+	}
+
+	const in = "host 10.200.1.9 is up"
+	if out, err := e.Tokenize(in); err == nil || !strings.Contains(err.Error(), "--extended-ipv4-pool") {
+		t.Fatalf("expected the 513th network to fail closed naming the flag, got %q, %v", out, err)
+	}
+
+	store.SetExtendedIPv4Pool(true)
+	out, err := e.Tokenize(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "host 240.0.0.9 is up" {
+		t.Fatalf("expected the first extended slot, 240.0.0, got %q", out)
+	}
+
+	store.SetExtendedIPv4Pool(false)
+	if again, err := e.Tokenize("recheck 10.200.1.44"); err != nil || again != "recheck 240.0.0.44" {
+		t.Fatalf("a network minted in the extended pool must keep its token with the pool off, got %q, %v", again, err)
+	}
+	if back := e.Detokenize(out); back != in {
+		t.Fatalf("240.x token did not detokenize with the pool off: %q", back)
+	}
+	if first := e.Detokenize("host 198.18.0.7"); first != "host 10.0.0.7" {
+		t.Fatalf("an original 198.18 mapping changed: %q", first)
+	}
+	if _, err := e.Tokenize("new 10.201.1.1"); err == nil {
+		t.Fatal("expected a new network to be refused again with the pool off")
 	}
 }

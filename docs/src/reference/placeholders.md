@@ -18,7 +18,7 @@ with and does not identify anyone.
 |---|---|---|
 | Domain | `tok<16 hex>.<real suffix>` | the real public suffix, and any subdomain |
 | Email | `user-<12 hex>@<domain token>` | the shape, and which org the domain belongs to |
-| IPv4 | `198.18.<n>.<real host octet>` | the host octet, so hosts stay distinguishable |
+| IPv4 | `198.18.<n>.<real host octet>`, then `198.19.<n>.…`; `240.<a>.<b>.…` with `--extended-ipv4-pool` | the host octet, so hosts stay distinguishable |
 | IPv6 | `fd00:c0de:<32 bits>:<real interface ID>` | the 64-bit interface ID |
 | NANP phone | `<area code>-555-01<2 digits>` | that it is a NANP number |
 | International phone | `<real country code> 555-<4 digits>` | the real country calling code |
@@ -42,7 +42,18 @@ relationships between hosts without ever seeing whose they are.
   used deliberately *instead* of an RFC 1918 range, because internal
   engagements routinely target real `10.x`, `172.16-31.x` and
   `192.168.x` addresses, and the token space must not overlap real
-  targets.
+  targets. The first 256 networks of an engagement use `198.18.x`, the
+  next 256 use `198.19.x`.
+- **`240.0.0.0/4`** is the reserved "class E" block, which is never
+  routed and not assigned to hosts. It is used only if you start the
+  proxy with `--extended-ipv4-pool`, and then only once both halves of
+  `198.18.0.0/15` are full. Placeholders there are written
+  `240.<a>.<b>.<host>`. The RFC 5737 documentation ranges (TEST-NET) are
+  never used for placeholders.
+
+An address that is already inside one of these ranges is never redacted,
+because it cannot be told apart from a placeholder. That is harmless for
+`198.18.0.0/15` and for `240.0.0.0/8`, which real targets do not use.
 - **`fd00::/8`** is RFC 4193 Unique Local Address space, never a real
   global address.
 - **`555-01XX`** is the NANP exchange reserved for fictional use under
@@ -114,6 +125,7 @@ visually distinct.
 | Aadhaar | `0000 <4 digits> <4 digits>` | UIDAI never issues a number starting with 0 or 1 |
 | PAN | `FAKEP<4 digits><letter>` | `E` is not a valid holder-type code in position 4 |
 | AD machine account | `FAKEHOST<hex>$` | keeps the `$` suffix that makes it recognizable |
+| Labeled password | `FAKE-PASSWORD-<hex>` | `K` is not a hex digit, and it reads as a placeholder at a glance |
 | GPP cpassword | `FAKE-CPASSWORD-<hex>` | contains `-`, which is not in the base64 alphabet, so it can never decrypt |
 | Custom block entry | `tok-blocked-<hex>` | opaque by design |
 | itsdangerous token | `tok-signed-<hex>` | opaque by design |
@@ -138,7 +150,7 @@ placeholders you copy by hand.
 
 **An unfamiliar placeholder is not a bug.** It is either a token doing
 its job, or an over-redaction of something merely domain-shaped
-(`table.style`, where `.style` is a real suffix). Either way the real
+(`config.live`, where `.live` is a real suffix). Either way the real
 value is substituted before execution, on every response rather than
 just the first, so the command runs correctly regardless. The real
 filesystem is ground truth here, since the proxy only ever inspects API
@@ -150,10 +162,14 @@ rather than at reasoning around the token.
 Two placeholder spaces are counter-allocated rather than random, and one
 of them is finite:
 
-- **IPv4 networks: 256 per engagement.** Each distinct real /24 gets
-  one. An engagement touching more than 256 distinct /24 networks would
-  be unusual, but if it happens the request that hits the 257th fails
-  closed rather than reusing a placeholder.
+- **IPv4 networks: 512 per engagement by default.** Each distinct real
+  /24 gets one, all in `198.18.0.0/15`. A request that needs a 513th
+  fails closed rather than reusing a placeholder, and the proxy's log
+  names the fix: restart it with `--extended-ipv4-pool`, which adds
+  65,536 more in `240.0.0.0/4`. A sweep of a whole /16 needs that flag.
+  Slots are not reused, so `tokens remove` does not free one. Turning
+  the flag off again later is safe: placeholders already issued, in
+  either range, keep working.
 - **IPv6 networks: about 4.3 billion per engagement.** No realistic
   exhaustion risk.
 

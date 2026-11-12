@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"net/netip"
 	"slices"
 	"strings"
 
@@ -40,6 +41,17 @@ const (
 	// living in a range real targets are likely to use, to keep "is this
 	// address real or ours" unambiguous.
 	TokenIPNetworkPrefix = "198.18."
+	// TokenIPNetworkPrefix2 is the second half of the same RFC 2544
+	// block, used for networks 257-512 of an engagement.
+	TokenIPNetworkPrefix2 = "198.19."
+	// TokenIPNetworkOverflowPrefix begins the tokens minted once both
+	// halves of 198.18.0.0/15 are used up: "240." + two octets, e.g.
+	// "240.3.17". 240.0.0.0/4 is the reserved "class E" block, never
+	// routed and not used for real hosts, so like 198.18.0.0/15 it
+	// cannot be mistaken for a target. It is the fallback rather than
+	// the default because tools and readers recognise it less readily
+	// as an ordinary address.
+	TokenIPNetworkOverflowPrefix = "240."
 	// TokenIPv6NetworkPrefix begins every generated IPv6 /64-network
 	// token: "fd00:c0de:" + two hex groups (32 bits), e.g.
 	// "fd00:c0de:1a2b:3c4d"; the last four groups (64-bit interface ID)
@@ -163,6 +175,10 @@ const (
 	// real decryptable cpassword value if it somehow ended up somewhere
 	// this tool doesn't control.
 	TokenGPPCPasswordPrefix = "FAKE-CPASSWORD-"
+	// TokenPasswordPrefix begins every generated fake plaintext password.
+	// Same "FAKE-" anchor as the cpassword token, so it reads as a
+	// placeholder at a glance and can't collide with a random secret.
+	TokenPasswordPrefix = "FAKE-PASSWORD-"
 )
 
 var counterKeyIPNetwork = []byte("ip_network")
@@ -276,6 +292,7 @@ var randomTokenShapes = map[EntityType]func() string{
 	EntityCustomBlock:       func() string { return TokenCustomBlockPrefix + randomHex(16) },
 	EntityADMachineAccount:  func() string { return TokenADMachineAccountPrefix + randomHex(6) + "$" },
 	EntityGPPCPassword:      func() string { return TokenGPPCPasswordPrefix + randomHex(24) },
+	EntityPassword:          func() string { return TokenPasswordPrefix + randomHex(12) },
 }
 
 // AllEntityTypes returns every entity type this package can mint a token
@@ -306,13 +323,13 @@ func AllEntityTypes() []EntityType {
 // collision checks are atomic with the caller's own persistence of the
 // mapping. existingTokens lets it avoid (vanishingly unlikely)
 // collisions with already-minted random tokens without a DB round trip.
-func nextToken(tx *bolt.Tx, et EntityType, existingTokens map[string]string) (string, error) {
+func nextToken(tx *bolt.Tx, et EntityType, existingTokens map[string]string, ipNetworkLimit uint32) (string, error) {
 	// The two counter-based network types come first: unlike everything
 	// in randomTokenShapes, their token IS a sequence position, so
 	// they're allocated from a persisted counter rather than drawn.
 	switch et {
 	case EntityIPNetwork:
-		return nextIPNetwork(tx, existingTokens)
+		return nextIPNetwork(tx, existingTokens, ipNetworkLimit)
 	case EntityIPv6Network:
 		return nextIPv6Network(tx, existingTokens)
 	}
@@ -335,22 +352,72 @@ func nextRandom(existingTokens map[string]string, gen func() string) (string, er
 	return "", fmt.Errorf("failed to generate a unique token after 10 attempts")
 }
 
-// nextIPNetwork mints a fake /24-network token: "198.18." + one octet.
-// Real value key (chosen by the caller, redact.ipv4Detector) is the real
-// address's first three octets, so every host in the same real /24
-// shares this same token; only 256 distinct networks per engagement,
-// which comfortably covers realistic scope (an engagement touching
-// hundreds of distinct /24s would be unusual).
-func nextIPNetwork(tx *bolt.Tx, existingTokens map[string]string) (string, error) {
+// How many distinct IPv4 /24 networks one engagement can hold.
+//
+// DefaultIPNetworks is the whole of 198.18.0.0/15: 256 under 198.18.
+// and 256 under 198.19. Past that a store fails closed unless its
+// extended pool is switched on (Store.SetExtendedIPv4Pool, the proxy's
+// --extended-ipv4-pool flag), which adds 65,536 under 240.x.y. The
+// class E range is opt-in because it is a less ordinary-looking
+// address than the benchmark block, and an operator should choose to
+// see it rather than have it appear once a scan grows large enough.
+const (
+	DefaultIPNetworks  uint32 = 512
+	ExtendedIPNetworks uint32 = DefaultIPNetworks + 65536
+)
+
+// ipNetworkToken is the token for the n-th (0-indexed) network minted in
+// an engagement. The order is fixed, so tokens minted before the pool
+// was extended past 198.18. keep their meaning.
+func ipNetworkToken(n uint32) string {
+	switch {
+	case n < 256:
+		return fmt.Sprintf("%s%d", TokenIPNetworkPrefix, n)
+	case n < 512:
+		return fmt.Sprintf("%s%d", TokenIPNetworkPrefix2, n-256)
+	default:
+		n -= 512
+		return fmt.Sprintf("%s%d.%d", TokenIPNetworkOverflowPrefix, n/256, n%256)
+	}
+}
+
+// IsIPv4PlaceholderAddr reports whether addr lies in a range this
+// package mints IPv4 tokens from: 198.18.0.0/15 or 240.0.0.0/8. The
+// detector must leave such an address alone, since it is (or is
+// indistinguishable from) one of this tool's own placeholders. That
+// holds for 240.0.0.0/8 whether or not the extended pool is on for this
+// run: a token minted there by an earlier run must still be recognised.
+func IsIPv4PlaceholderAddr(addr netip.Addr) bool {
+	if !addr.Is4() {
+		return false
+	}
+	b := addr.As4()
+	return (b[0] == 198 && (b[1] == 18 || b[1] == 19)) || b[0] == 240
+}
+
+// nextIPNetwork mints a fake /24-network token; see ipNetworkToken for
+// the ranges, used in order, and limit for how far into them this store
+// may go. Real value key (chosen by the caller, redact.ipv4Detector) is
+// the real address's first three octets, so every host in the same real
+// /24 shares this same token. Slots are never reused: the counter only
+// grows, so removing a mapping does not free its token.
+//
+// A refused mint returns an error from inside the caller's transaction,
+// which rolls the counter increment back, so the next network gets the
+// very next slot once the limit is raised.
+func nextIPNetwork(tx *bolt.Tx, existingTokens map[string]string, limit uint32) (string, error) {
 	b := tx.Bucket(bucketCounters)
 	n, err := incrementCounter(b, counterKeyIPNetwork)
 	if err != nil {
 		return "", err
 	}
-	if n > 256 {
-		return "", fmt.Errorf("exhausted %sXX token network space (256 networks)", TokenIPNetworkPrefix)
+	if n > limit {
+		if limit < ExtendedIPNetworks {
+			return "", fmt.Errorf("exhausted the IPv4 network token space (%d networks in 198.18.0.0/15); restart the proxy with --extended-ipv4-pool to continue in 240.0.0.0/4", limit)
+		}
+		return "", fmt.Errorf("exhausted the IPv4 network token space (%d networks)", limit)
 	}
-	candidate := fmt.Sprintf("%s%d", TokenIPNetworkPrefix, n-1) // n is 1-indexed; shift to cover 0..255
+	candidate := ipNetworkToken(n - 1) // n is 1-indexed
 	if _, taken := existingTokens[candidate]; taken {
 		return "", fmt.Errorf("token IP network collision on %s (counter desync)", candidate)
 	}

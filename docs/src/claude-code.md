@@ -172,6 +172,11 @@ It also covers several failure modes worth knowing about yourself:
   documentation space because it is reserved benchmarking space, chosen
   so it can never collide with a real target. It stands in for a real,
   sensitive address and should be reasoned about as one.
+- **Don't comment on placeholders, and never write a partial one.** You
+  see real values, so a remark about placeholder ranges means nothing to
+  you, and a partial address such as `198.18.x` cannot be restored and
+  reaches you as written. Complete hosts and complete CIDR blocks are
+  restored.
 - **An unfamiliar-looking token is not a bug.** It is either a token
   doing its job or an over-redaction of something merely domain-shaped.
   Either way the real value is substituted before execution, so the
@@ -189,4 +194,30 @@ session on the machine, including sessions with no proxy in front of
 them.
 
 Appending is idempotent. Re-running the wizard or `memory --write`
-detects the existing note and leaves the file unchanged.
+detects the existing note and leaves the file unchanged. That also
+means a folder set up with an older redactproxy keeps the note it has.
+To pick up a newer version of the note, delete the "Redaction proxy
+active" section from `CLAUDE.md` and run `memory --write` again.
+
+## The prompt reminder hook
+
+The `CLAUDE.md` note is read at the start of a session. In a long one it
+ends up far back in the conversation, and Claude can drift from it:
+retyping a placeholder slightly wrong, or commenting on placeholder
+ranges. The wizard asks whether to add a reminder for this, defaulting
+to no. If you declined and see drift later, re-run the wizard and answer
+yes, or pass the flag to skip the question:
+
+```bash
+redactproxy wizard --prompt-reminder
+```
+
+It adds a `UserPromptSubmit` hook to `.claude/settings.local.json`. On
+every prompt the hook prints one line restating the rules, which Claude
+Code adds to the conversation next to your message. Other hooks in the
+file are left alone, and running it again replaces the entry rather than
+adding a second one.
+
+It is off by default because it costs about 60 words of input on every
+prompt. To remove it, delete the entry containing `[redactproxy]` from
+the `hooks` section of the settings file.

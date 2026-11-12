@@ -38,6 +38,31 @@ func TestRememberEngagement_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestRememberEngagement_RefusesSymlink: a marker planted as a symlink
+// (a hostile repository) must not make the write land on its target.
+func TestRememberEngagement_RefusesSymlink(t *testing.T) {
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "victim.txt")
+	if err := os.WriteFile(victim, []byte("precious\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	work := filepath.Join(dir, "work")
+	if err := os.Mkdir(work, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(work, engagementMarkerFile)); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	t.Chdir(work)
+	if err := rememberEngagement("some-engagement"); err == nil {
+		t.Fatal("expected a symlinked marker to be refused")
+	}
+	got, _ := os.ReadFile(victim)
+	if string(got) != "precious\n" {
+		t.Fatalf("symlink target was overwritten: %q", got)
+	}
+}
+
 func TestRememberEngagement_OverwritesPreviousValue(t *testing.T) {
 	t.Chdir(t.TempDir())
 	if err := rememberEngagement("first-client"); err != nil {
@@ -398,6 +423,41 @@ func TestMissingSecuritySettings(t *testing.T) {
 	}
 	if missing := missingSecuritySettings(); len(missing) != wantCount {
 		t.Fatalf("expected everything reported missing (safe default) for invalid JSON, not a crash, got %d: %+v", len(missing), missing)
+	}
+}
+
+// TestCheckListenAddr pins the --allow-non-loopback gate: loopback is
+// always allowed and never reported as exposed; anything else is refused
+// without the flag (with an error that names it) and allowed, but
+// reported as exposed so the caller warns, with it.
+func TestCheckListenAddr(t *testing.T) {
+	cases := []struct {
+		addr                 string
+		allow                bool
+		wantExposed, wantErr bool
+	}{
+		{"127.0.0.1:8787", false, false, false},
+		{"localhost:8787", true, false, false}, // flag given but not needed: no warning
+		{"[::1]:8787", false, false, false},
+		{"0.0.0.0:8787", false, false, true},
+		{"0.0.0.0:8787", true, true, false},
+		{":8787", false, false, true},
+		{":8787", true, true, false},
+		{"192.168.1.5:8787", false, false, true},
+		{"192.168.1.5:8787", true, true, false},
+		{"[::]:8787", true, true, false},
+	}
+	for _, tc := range cases {
+		exposed, err := checkListenAddr(tc.addr, tc.allow)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("checkListenAddr(%q, %v) err = %v, wantErr %v", tc.addr, tc.allow, err, tc.wantErr)
+		}
+		if err != nil && !strings.Contains(err.Error(), "--allow-non-loopback") {
+			t.Errorf("checkListenAddr(%q) refusal must name the flag that overrides it, got: %v", tc.addr, err)
+		}
+		if exposed != tc.wantExposed {
+			t.Errorf("checkListenAddr(%q, %v) exposed = %v, want %v", tc.addr, tc.allow, exposed, tc.wantExposed)
+		}
 	}
 }
 

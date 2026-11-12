@@ -9,11 +9,14 @@ package proxyserver
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -65,6 +68,7 @@ type Server struct {
 	sem          chan struct{}
 	logger       *slog.Logger
 	debug        *debuglog.Logger
+	allowedHosts map[string]bool
 }
 
 // Config configures a new Server. Upstream and Engine are required;
@@ -79,6 +83,10 @@ type Config struct {
 	// body logging; see package debuglog. Nil (the default) disables
 	// this entirely at effectively zero per-request cost.
 	DebugLogger *debuglog.Logger
+	// AllowedHosts are extra DNS names clients may address this proxy by,
+	// on top of "localhost" and any IP literal, which are always
+	// accepted; see Server.browserOriginProblem.
+	AllowedHosts []string
 }
 
 func New(cfg Config) *Server {
@@ -105,7 +113,13 @@ func New(cfg Config) *Server {
 	transport.MaxIdleConnsPerHost = maxConcurrent
 	transport.IdleConnTimeout = 90 * time.Second
 
+	allowedHosts := make(map[string]bool, len(cfg.AllowedHosts))
+	for _, h := range cfg.AllowedHosts {
+		allowedHosts[normalizeHost(h)] = true
+	}
+
 	return &Server{
+		allowedHosts: allowedHosts,
 		upstream:     cfg.Upstream,
 		engine:       cfg.Engine,
 		maxBodyBytes: maxBody,
@@ -124,6 +138,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// rotates, if needed, at this exact boundary rather than reactively
 	// mid-round-trip.
 	s.debug.BeginRoundTrip()
+
+	if problem := s.browserOriginProblem(r); problem != "" {
+		s.logger.Warn("request refused: "+problem, "host", r.Host, "origin", r.Header.Get("Origin"), "path", r.URL.Path)
+		writeAPIError(w, http.StatusForbidden, "permission_error", "refused by the local proxy: "+problem)
+		return
+	}
 
 	select {
 	case s.sem <- struct{}{}:
@@ -154,8 +174,21 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A compressed body is opaque to everything below, and the upstream
+	// would decompress it and read real values the scan never saw.
+	reqBody, err = s.decodeRequestBody(r, reqBody)
+	if err != nil {
+		s.logger.Error("decode request body; blocking request", "err", err, "path", r.URL.Path)
+		writeAPIError(w, http.StatusUnsupportedMediaType, "invalid_request_error", "blocked by the local proxy: "+err.Error())
+		return
+	}
+
 	outBody := reqBody
-	if len(reqBody) > 0 && looksLikeJSON(r.Header.Get("Content-Type")) {
+	// Scanned on what the body looks like, not only on what the header
+	// claims: a JSON body sent as "text/plain" or with no Content-Type at
+	// all can still be parsed as JSON upstream, so trusting the header
+	// alone forwarded it with every real value intact.
+	if len(reqBody) > 0 && (looksLikeJSON(r.Header.Get("Content-Type")) || startsLikeJSON(reqBody)) {
 		tokenized, err := jsonwalk.Tokenize(reqBody, s.engine.Tokenize)
 		if err != nil {
 			// Fail closed: a redaction failure must never result in the
@@ -211,6 +244,105 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.proxyBuffered(w, resp, r.URL.Path)
 }
 
+// browserOriginProblem reports why r looks like it was sent by a web
+// page rather than by a client pointed at this proxy on purpose, or ""
+// if it doesn't.
+//
+// The proxy has no authentication and detokenizes every response, and it
+// listens on a well-known local port, which makes it a target for any
+// page open in the operator's browser. Some placeholders are cheap to
+// enumerate (a fake IPv4 is a small counter plus the real host octet), so
+// a page that can read responses can recover real addresses with an API
+// key of its own. Two routes get it there, and both show up in headers
+// the page cannot forge:
+//
+//   - DNS rebinding: the page's own hostname is re-pointed at this
+//     machine, so its requests are same-origin and readable. They arrive
+//     with that hostname in Host. A client configured with an IP or
+//     "localhost" never sends a DNS name there, so only "localhost", IP
+//     literals and names the operator listed are accepted.
+//   - A cross-origin request straight at the IP: Host is fine, but the
+//     browser attaches Origin (and Sec-Fetch-Site) naming the page. An
+//     Origin is accepted only when it is this proxy's own address.
+//
+// An IP-literal Host is accepted whatever the address, so a proxy bound
+// to 0.0.0.0 keeps working for clients that reach it by LAN IP.
+func (s *Server) browserOriginProblem(r *http.Request) string {
+	if !s.hostAllowed(r.Host) {
+		return "Host is not an IP address, localhost, or a name given with --allow-host"
+	}
+	// Same-origin only, not merely "an allowed host": a page served from
+	// a bare IP address, or from another port on localhost, would pass a
+	// host check and is still somebody else's page.
+	if origin := r.Header.Get("Origin"); origin != "" {
+		u, err := url.Parse(origin)
+		if err != nil || u.Host == "" || !strings.EqualFold(u.Host, r.Host) {
+			return "cross-origin browser request"
+		}
+	}
+	if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+		return "cross-site browser request"
+	}
+	return ""
+}
+
+func (s *Server) hostAllowed(hostport string) bool {
+	host := normalizeHost(hostport)
+	if host == "localhost" || s.allowedHosts[host] {
+		return true
+	}
+	_, err := netip.ParseAddr(host)
+	return err == nil
+}
+
+// normalizeHost reduces a Host header or --allow-host value to a bare
+// lowercase hostname or IP: no port, no IPv6 brackets or zone, no
+// trailing dot.
+func normalizeHost(hostport string) string {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	if i := strings.IndexByte(host, '%'); i != -1 {
+		host = host[:i]
+	}
+	return strings.ToLower(strings.TrimSuffix(host, "."))
+}
+
+// decodeRequestBody undoes the request's Content-Encoding so the body
+// can be scanned, and drops the header: the body is then forwarded
+// uncompressed. Claude Code gzips large requests it sends straight to
+// api.anthropic.com, though not ones sent to a custom base URL today.
+//
+// gzip is the only coding handled. Any other one is refused, because a
+// body this proxy cannot read is one it cannot redact. The decompressed
+// size is held to the same limit as an uncompressed body, so a small
+// compressed request cannot expand without bound.
+func (s *Server) decodeRequestBody(r *http.Request, body []byte) ([]byte, error) {
+	encoding := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Encoding")))
+	switch encoding {
+	case "", "identity":
+		return body, nil
+	case "gzip", "x-gzip":
+		zr, err := gzip.NewReader(bytes.NewReader(body))
+		if err != nil {
+			return nil, fmt.Errorf("request body is not valid gzip: %w", err)
+		}
+		decoded, err := io.ReadAll(io.LimitReader(zr, s.maxBodyBytes+1))
+		if err != nil {
+			return nil, fmt.Errorf("request body is not valid gzip: %w", err)
+		}
+		if int64(len(decoded)) > s.maxBodyBytes {
+			return nil, fmt.Errorf("decompressed request body exceeds the proxy's size limit")
+		}
+		r.Header.Del("Content-Encoding")
+		return decoded, nil
+	default:
+		return nil, fmt.Errorf("request Content-Encoding %q cannot be scanned; send the body uncompressed or as gzip", encoding)
+	}
+}
+
 func (s *Server) buildUpstreamRequest(r *http.Request, body []byte) (*http.Request, error) {
 	dst := *s.upstream
 	dst.Path = singleJoiningSlash(s.upstream.Path, r.URL.Path)
@@ -251,8 +383,20 @@ func (s *Server) proxyBuffered(w http.ResponseWriter, resp *http.Response, path 
 	}
 
 	outBody := body
-	if len(body) > 0 && looksLikeJSON(resp.Header.Get("Content-Type")) {
+	switch ct := resp.Header.Get("Content-Type"); {
+	case len(body) == 0:
+	case looksLikeJSON(ct):
 		outBody = jsonwalk.Detokenize(body, s.engine.Detokenize)
+	case looksLikeJSONLines(ct):
+		// A batch's results: one JSON document per line, each wrapping
+		// an ordinary response message (see jsonwalk.collectPaths).
+		lines := bytes.Split(body, []byte("\n"))
+		for i, line := range lines {
+			if len(bytes.TrimSpace(line)) > 0 {
+				lines[i] = jsonwalk.Detokenize(line, s.engine.Detokenize)
+			}
+		}
+		outBody = bytes.Join(lines, []byte("\n"))
 	}
 	s.debug.FullBody("response", path, outBody, body) // (real, tokenized) -- detokenize direction, so real is the OUTPUT here
 
@@ -262,8 +406,37 @@ func (s *Server) proxyBuffered(w http.ResponseWriter, resp *http.Response, path 
 	_, _ = w.Write(outBody)
 }
 
+// looksLikeJSON reports whether a Content-Type header declares JSON:
+// application/json or any "+json" structured-syntax type, with or
+// without parameters. Media types are case-insensitive (RFC 9110).
 func looksLikeJSON(contentType string) bool {
-	return strings.HasPrefix(strings.TrimSpace(contentType), "application/json")
+	mediaType, _, _ := strings.Cut(contentType, ";")
+	mediaType = strings.ToLower(strings.TrimSpace(mediaType))
+	return mediaType == "application/json" || strings.HasSuffix(mediaType, "+json")
+}
+
+// looksLikeJSONLines reports whether a Content-Type header declares
+// newline-delimited JSON, which is how the API serves batch results.
+func looksLikeJSONLines(contentType string) bool {
+	mediaType, _, _ := strings.Cut(contentType, ";")
+	switch strings.ToLower(strings.TrimSpace(mediaType)) {
+	case "application/x-jsonl", "application/jsonl", "application/x-ndjson", "application/jsonlines":
+		return true
+	}
+	return false
+}
+
+// startsLikeJSON reports whether body opens a JSON object or array,
+// whatever its Content-Type says. Deliberately not a validity check: a
+// body that starts like JSON but is malformed or truncated still carries
+// its real values, and routing it to jsonwalk.Tokenize gets it blocked
+// there instead of forwarded. A bare JSON scalar doesn't count: no API
+// request body is one, and it would make plain text like "123" qualify.
+func startsLikeJSON(body []byte) bool {
+	// A UTF-8 byte-order mark ahead of the JSON is skipped for this test
+	// only; the walker then rejects the body, BOM and all, as malformed.
+	trimmed := bytes.TrimLeft(bytes.TrimPrefix(body, []byte("\xef\xbb\xbf")), " \t\r\n")
+	return len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[')
 }
 
 func copyHeader(dst, src http.Header) {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -125,6 +126,26 @@ func TestValidate_RejectsEmptyValue(t *testing.T) {
 				t.Fatal("expected Compile to also reject an empty value")
 			}
 		})
+	}
+}
+
+// TestValidate_RejectsRegexMatchingEmptyString: an unanchored allow
+// regex that can match "" matches every value and would switch redaction
+// off; the same block regex makes every request fail.
+func TestValidate_RejectsRegexMatchingEmptyString(t *testing.T) {
+	for _, pattern := range []string{"x*", "(?i)", "a?", "(foo)?", "^", "$", ".*"} {
+		for name, cfg := range map[string]Config{
+			"allow": {Allow: []Entry{{Value: pattern, Regex: true}}},
+			"block": {Block: []Entry{{Value: pattern, Regex: true}}},
+		} {
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "empty string") {
+				t.Errorf("%s regex %q: expected an empty-match error, got %v", name, pattern, err)
+			}
+		}
+	}
+	ok := Config{Allow: []Entry{{Value: `^10\.0\.0\.\d+$`, Regex: true}}, Block: []Entry{{Value: `(?i)acme\w*`, Regex: true}}}
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("ordinary regexes rejected: %v", err)
 	}
 }
 

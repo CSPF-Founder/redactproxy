@@ -1,6 +1,6 @@
 # Detector categories
 
-There are 44 detector categories. Each can be enabled or disabled per
+There are 47 detector categories. Each can be enabled or disabled per
 engagement:
 
 ```bash
@@ -91,6 +91,7 @@ the same source. This page is that list, grouped.
 | Category | Detects |
 |---|---|
 | `network.domain` | Domain names and hostnames, bare or embedded in a URL. |
+| `network.internal_host` | Internal hostnames with no dot (appdbnode02), when they contain a digit and stand as the host of a URL or before a port after "@". |
 | `network.ipv4` | IPv4 addresses. |
 | `network.ipv6` | IPv6 addresses. |
 | `network.mac` | MAC addresses. |
@@ -112,12 +113,14 @@ the same source. This page is that list, grouped.
 
 | Category | Detects |
 |---|---|
-| `secrets.bearer_token` | Opaque Bearer/API tokens following an Authorization header. |
+| `secrets.bearer_token` | Opaque Bearer/API tokens and HTTP Basic credentials following an Authorization header. |
 | `secrets.connection_string` | Database/service connection strings with embedded credentials. |
 | `secrets.itsdangerous_token` | Flask itsdangerous-signed tokens (session/CSRF tokens). |
 | `secrets.jwt` | JSON Web Tokens (JWTs). |
+| `secrets.password` | Plaintext passwords labeled by a password-like key (DB_PASSWORD=..., "password": "...", password: ...). |
 | `secrets.password_hash` | Password hashes (MD5/NTLM/SHA-1/SHA-256), only when labeled by a nearby keyword, or in an Impacket secretsdump-style LM:NT pair. |
 | `secrets.pem_key` | PEM-armored private key blocks. |
+| `secrets.vendor_keys` | Other vendor-prefixed keys: Google OAuth, Hugging Face, Shopify, PyPI, Databricks, Slack app, Telegram and Discord bot tokens, Microsoft Entra client secrets, and the signature of an Azure SAS URL. |
 
 ### `vcs`
 
@@ -172,6 +175,11 @@ innocent text costs more than one that misses an edge case:
 - **Reserved and documentation values.** `example.com`, RFC 5737
   documentation IP ranges and similar are excluded, since they are not
   client data and tokenizing them just adds noise.
+- **Internal hostnames with no dot, outside a host position.** A name
+  like `appdbnode02` is redacted as the host of a URL or before a port
+  after `@`, and only if it contains a digit. Mentioned in a sentence,
+  or named without a digit (`fileserver`), it is an ordinary word to a
+  regex. Use `rules block` for those.
 - **Names and prose**, which have no shape at all. Use `rules block`.
 
 See [Known gaps](../security/gaps.md) for the full picture.

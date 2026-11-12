@@ -3,6 +3,7 @@ package proxyserver
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,6 +22,7 @@ import (
 	"github.com/CSPF-Founder/redactproxy/internal/debuglog"
 	"github.com/CSPF-Founder/redactproxy/internal/redact"
 	"github.com/CSPF-Founder/redactproxy/internal/tokenstore"
+	"github.com/tidwall/gjson"
 )
 
 func newTestServer(t *testing.T, upstream *httptest.Server) *httptest.Server {
@@ -176,6 +178,322 @@ func TestProxy_MultiTurn_ReTokenizesRealValueEchoedBackInConversationHistory(t *
 			t.Fatalf("turn 2 used a DIFFERENT token (%q) for the same real value turn 1 tokenized as %q -- consistency broken across turns", m, turn1Token)
 		}
 	}
+}
+
+// TestProxy_AutoModeSafeguards_TokenizedConsistentlyWithMessages: the
+// working directory and git remote auto mode copies into the safeguards
+// field must reach the upstream as the SAME tokens the conversation uses,
+// so the server-side review compares like with like, and the
+// safeguard_results verdict, keyed by tool_use ID, must come back to the
+// client unchanged.
+func TestProxy_AutoModeSafeguards_TokenizedConsistentlyWithMessages(t *testing.T) {
+	var captured []byte
+	verdict := `{"type":"message_delta","delta":{"stop_reason":"tool_use","safeguard_results":[{"type":"dangerous_tool_use","status":{"type":"available","tool_uses":{"toolu_01ABC":{"type":"evaluated","outcome":"not_flagged"}}}}]},"usage":{"output_tokens":5}}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, "event: message_delta\ndata: %s\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n", verdict)
+	}))
+	defer upstream.Close()
+	ts := newTestServer(t, upstream)
+
+	reqBody := `{"model":"m","stream":true,"messages":[{"role":"user","content":"Scope: widgetcorp-fixture.com. Working directory: /home/u/widgetcorp-fixture.com/eng"},` +
+		`{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01ABC","name":"Bash","input":{"command":"curl -s https://portal.widgetcorp-fixture.com/"}}]}],` +
+		`"safeguards":[{"type":"dangerous_tool_use","classifier_context":{"v":1,"live_cwd":"/home/u/widgetcorp-fixture.com/eng",` +
+		`"git_state":{"visibility":{"origin":{"host":"git.widgetcorp-fixture.com","remote":"acme/payroll"}}},` +
+		`"rules":{"deny":[{"rule":"Bash(ssh admin@10.20.30.40)"}]},` +
+		`"prior_turn_context":[{"tool_use_ids":["toolu_01ABC"],"context":{"live_cwd":"/home/u/widgetcorp-fixture.com/eng"}}]}}]}`
+	resp, err := http.Post(ts.URL+"/v1/messages", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+
+	sent := string(captured)
+	for _, real := range []string{"widgetcorp-fixture.com", "10.20.30.40"} {
+		if strings.Contains(sent, real) {
+			t.Fatalf("real value %q reached upstream: %s", real, sent)
+		}
+	}
+	msgTok := regexp.MustCompile(`tok[0-9a-f]{16}`).FindString(gjson.Get(sent, "messages.0.content").String())
+	if msgTok == "" {
+		t.Fatalf("expected the domain tokenized in messages: %s", sent)
+	}
+	if got := gjson.Get(sent, "safeguards.0.classifier_context.live_cwd").String(); got != "/home/u/"+msgTok+".com/eng" {
+		t.Fatalf("safeguards cwd tokenized differently from messages (%s): %s", msgTok, got)
+	}
+	if got := gjson.Get(sent, "safeguards.0.classifier_context.prior_turn_context.0.tool_use_ids.0").String(); got != "toolu_01ABC" {
+		t.Fatalf("tool_use_ids must pass through unchanged, got %q", got)
+	}
+	if !strings.Contains(string(out), verdict) {
+		t.Fatalf("safeguard_results verdict not passed back unchanged: %s", out)
+	}
+}
+
+// TestProxy_BrowserOriginRequestsRefused: a request that carries a web
+// page's fingerprints -- a DNS name in Host (rebinding) or a foreign
+// Origin (cross-origin fetch) -- is refused before it reaches the
+// upstream, while every way a real client addresses the proxy, including
+// by LAN IP when it listens on all interfaces, still works.
+func TestProxy_BrowserOriginRequestsRefused(t *testing.T) {
+	hits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"type":"message","role":"assistant","content":[]}`)
+	}))
+	defer upstream.Close()
+	upstreamURL, _ := url.Parse(upstream.URL)
+	store, err := tokenstore.Open(filepath.Join(t.TempDir(), "tokens.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	srv := New(Config{Upstream: upstreamURL, Engine: redact.New(store, redact.DefaultDetectors()...), AllowedHosts: []string{"Buildbox.LAN."}})
+
+	cases := []struct {
+		name, host, origin, fetchSite string
+		wantOK                        bool
+	}{
+		{"loopback IP", "127.0.0.1:8787", "", "", true},
+		{"localhost", "localhost:8787", "", "", true},
+		{"LAN IP", "192.168.0.190:8787", "", "", true},
+		{"IPv6 loopback", "[::1]:8787", "", "", true},
+		{"no port", "127.0.0.1", "", "", true},
+		{"allowed name", "buildbox.lan:8787", "", "", true},
+		{"allowed name, other case", "BUILDBOX.lan:8787", "", "", true},
+		{"same-origin page on the proxy's own address", "127.0.0.1:8787", "http://127.0.0.1:8787", "same-origin", true},
+		{"rebinding: attacker name in Host", "evil.example:8787", "", "", false},
+		{"rebinding with Origin", "evil.example:8787", "http://evil.example:8787", "same-origin", false},
+		{"name that only starts with localhost", "localhost.evil.example:8787", "", "", false},
+		{"cross-origin fetch", "127.0.0.1:8787", "https://evil.example", "", false},
+		{"cross-origin fetch from a page served by bare IP", "192.168.0.190:8787", "http://203.0.113.5", "", false},
+		{"page on another localhost port", "localhost:8787", "http://localhost:3000", "same-site", false},
+		{"same-origin page, host in other case", "LocalHost:8787", "http://localhost:8787", "same-origin", true},
+		{"opaque origin", "127.0.0.1:8787", "null", "", false},
+		{"cross-site without Origin", "127.0.0.1:8787", "", "cross-site", false},
+		{"empty Host", "", "", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			before := hits
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"messages":[]}`))
+			req.Host = tc.host
+			req.Header.Set("Content-Type", "application/json")
+			if tc.origin != "" {
+				req.Header.Set("Origin", tc.origin)
+			}
+			if tc.fetchSite != "" {
+				req.Header.Set("Sec-Fetch-Site", tc.fetchSite)
+			}
+			rec := httptest.NewRecorder()
+			srv.ServeHTTP(rec, req)
+			gotOK := rec.Code == http.StatusOK
+			if gotOK != tc.wantOK || (hits > before) != tc.wantOK {
+				t.Fatalf("status %d, reached upstream %v; want allowed=%v", rec.Code, hits > before, tc.wantOK)
+			}
+			if !tc.wantOK && rec.Code != http.StatusForbidden {
+				t.Fatalf("expected 403, got %d", rec.Code)
+			}
+		})
+	}
+}
+
+// TestProxy_MessageBatches_TokenizedOutDetokenizedBack: a create-batch
+// body is tokenized entry by entry, and the JSONL results come back with
+// the real values restored on every line.
+func TestProxy_MessageBatches_TokenizedOutDetokenizedBack(t *testing.T) {
+	var created []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			created, _ = io.ReadAll(r.Body)
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"id":"msgbatch_1","type":"message_batch"}`)
+			return
+		}
+		// Results: echo each entry's (tokenized) prompt back as the answer.
+		w.Header().Set("Content-Type", "application/x-jsonl")
+		gjson.GetBytes(created, "requests").ForEach(func(_, req gjson.Result) bool {
+			line, _ := json.Marshal(map[string]any{"custom_id": req.Get("custom_id").String(), "result": map[string]any{"type": "succeeded", "message": map[string]any{
+				"role": "assistant", "content": []map[string]any{{"type": "text", "text": "done: " + req.Get("params.messages.0.content").String()}}}}})
+			fmt.Fprintf(w, "%s\n", line)
+			return true
+		})
+	}))
+	defer upstream.Close()
+	ts := newTestServer(t, upstream)
+
+	body := `{"requests":[{"custom_id":"a","params":{"model":"m","messages":[{"role":"user","content":"scan widgetcorp-fixture.com"}]}},{"custom_id":"b","params":{"model":"m","messages":[{"role":"user","content":"ping 10.20.30.40"}]}}]}`
+	resp, err := http.Post(ts.URL+"/v1/messages/batches", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if strings.Contains(string(created), "widgetcorp-fixture.com") || strings.Contains(string(created), "10.20.30.40") {
+		t.Fatalf("real value reached upstream in a batch: %s", created)
+	}
+
+	resp, err = http.Get(ts.URL + "/v1/messages/batches/msgbatch_1/results")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	results, _ := io.ReadAll(resp.Body)
+	lines := strings.Split(strings.TrimSpace(string(results)), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], "done: scan widgetcorp-fixture.com") || !strings.Contains(lines[1], "done: ping 10.20.30.40") {
+		t.Fatalf("batch results not detokenized line by line: %s", results)
+	}
+}
+
+// TestProxy_CompressedRequestBody: a gzip request body is decompressed,
+// scanned and forwarded uncompressed, whatever its Content-Type; a
+// coding the proxy cannot read, a corrupt gzip body and one that expands
+// past the size limit are all blocked before the upstream.
+func TestProxy_CompressedRequestBody(t *testing.T) {
+	var captured []byte
+	var capturedEncoding string
+	hits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		captured, _ = io.ReadAll(r.Body)
+		capturedEncoding = r.Header.Get("Content-Encoding")
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"type":"message","role":"assistant","content":[]}`)
+	}))
+	defer upstream.Close()
+	upstreamURL, _ := url.Parse(upstream.URL)
+	store, err := tokenstore.Open(filepath.Join(t.TempDir(), "tokens.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	ts := httptest.NewServer(New(Config{Upstream: upstreamURL, Engine: redact.New(store, redact.DefaultDetectors()...), MaxBodyBytes: 4096}))
+	defer ts.Close()
+
+	gz := func(s string) []byte {
+		var buf bytes.Buffer
+		zw := gzip.NewWriter(&buf)
+		zw.Write([]byte(s))
+		zw.Close()
+		return buf.Bytes()
+	}
+	post := func(contentType, encoding string, body []byte) int {
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/messages", bytes.NewReader(body))
+		req.Header.Set("Content-Type", contentType)
+		req.Header.Set("Content-Encoding", encoding)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	body := `{"model":"m","messages":[{"role":"user","content":"check widgetcorp-fixture.com"}]}`
+
+	for _, ct := range []string{"application/json", "text/plain"} {
+		for _, enc := range []string{"gzip", "GZIP", "x-gzip"} {
+			if code := post(ct, enc, gz(body)); code != http.StatusOK {
+				t.Fatalf("%s/%s: status %d", ct, enc, code)
+			}
+			if !gjson.ValidBytes(captured) || capturedEncoding != "" {
+				t.Fatalf("%s/%s: expected plain JSON upstream with no Content-Encoding, got encoding %q body %q", ct, enc, capturedEncoding, captured)
+			}
+			if strings.Contains(string(captured), "widgetcorp-fixture.com") || !strings.Contains(string(captured), "tok") {
+				t.Fatalf("%s/%s: body not tokenized: %s", ct, enc, captured)
+			}
+		}
+	}
+
+	blocked := map[string]struct {
+		encoding string
+		body     []byte
+	}{
+		"unsupported coding":     {"zstd", []byte(body)},
+		"stacked codings":        {"gzip, br", gz(body)},
+		"corrupt gzip":           {"gzip", []byte(body)},
+		"expands past the limit": {"gzip", gz(`{"messages":[{"role":"user","content":"` + strings.Repeat("a", 8192) + `"}]}`)},
+	}
+	for name, tc := range blocked {
+		before := hits
+		if code := post("application/json", tc.encoding, tc.body); code != http.StatusUnsupportedMediaType || hits != before {
+			t.Fatalf("%s: expected 415 before upstream, got status %d, upstream hits %d->%d", name, code, before, hits)
+		}
+	}
+}
+
+// TestProxy_RequestScannedWhateverTheContentType: the request scan must
+// not hinge on the client spelling "application/json" exactly. A JSON
+// body under a differently-cased, "+json", wrong or missing Content-Type
+// is tokenized all the same, and one that starts like JSON but is
+// malformed is blocked rather than forwarded.
+func TestProxy_RequestScannedWhateverTheContentType(t *testing.T) {
+	var captured []byte
+	hits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured, _ = io.ReadAll(r.Body)
+		hits++
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"type":"message","role":"assistant","content":[]}`)
+	}))
+	defer upstream.Close()
+	ts := newTestServer(t, upstream)
+
+	body := `{"model":"m","messages":[{"role":"user","content":"check widgetcorp-fixture.com"}]}`
+	for _, ct := range []string{"application/json", "Application/JSON", "application/json; charset=utf-8", "APPLICATION/JSON;charset=UTF-8", "application/vnd.api+json", "text/plain", ""} {
+		t.Run("ct="+ct, func(t *testing.T) {
+			req, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/messages", strings.NewReader("\n "+body))
+			if ct != "" {
+				req.Header.Set("Content-Type", ct)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status %d", resp.StatusCode)
+			}
+			if strings.Contains(string(captured), "widgetcorp-fixture.com") {
+				t.Fatalf("real value reached upstream: %s", captured)
+			}
+		})
+	}
+
+	t.Run("malformed JSON under text/plain is blocked", func(t *testing.T) {
+		before := hits
+		resp, err := http.Post(ts.URL+"/v1/messages", "text/plain", strings.NewReader(`{"messages":[{"role":"user","content":"check widgetcorp-fixture.com`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadGateway || hits != before {
+			t.Fatalf("expected the request blocked before upstream, got status %d, upstream hits %d->%d", resp.StatusCode, before, hits)
+		}
+	})
+
+	t.Run("JSON behind a byte-order mark is blocked", func(t *testing.T) {
+		before := hits
+		resp, err := http.Post(ts.URL+"/v1/messages", "text/plain", strings.NewReader("\xef\xbb\xbf"+body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadGateway || hits != before {
+			t.Fatalf("expected the request blocked before upstream, got status %d, upstream hits %d->%d", resp.StatusCode, before, hits)
+		}
+	})
+
+	t.Run("non-JSON body still passes through", func(t *testing.T) {
+		resp, err := http.Post(ts.URL+"/v1/files", "multipart/form-data; boundary=x", strings.NewReader("--x\r\ncontent\r\n--x--"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || string(captured) != "--x\r\ncontent\r\n--x--" {
+			t.Fatalf("status %d, upstream got %q", resp.StatusCode, captured)
+		}
+	})
 }
 
 // TestProxy_RequestBodyBoundary_ExactlyAtLimitAccepted_OneByteOverRejected
@@ -1175,6 +1493,145 @@ func TestProxy_Streaming_ThinkingBlockNeverModified(t *testing.T) {
 	raw, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(raw), thinkingText) {
 		t.Fatalf("thinking block content was modified; expected byte-identical passthrough of %q, got: %s", thinkingText, raw)
+	}
+}
+
+// TestProxy_Streaming_CompactionBlockNeverModified is the compaction
+// counterpart of the thinking test above: a server-side compaction
+// block is signed, so its streamed summary must reach the client
+// byte-identical even when it contains a token, for the client to echo
+// it back unchanged.
+func TestProxy_Streaming_CompactionBlockNeverModified(t *testing.T) {
+	dir := t.TempDir()
+	store, err := tokenstore.Open(filepath.Join(dir, "tokens.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	token, err := store.GetOrCreateToken("widgetcorp-fixture.com", tokenstore.EntityDomain)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	summary := "Summary: assessing " + token
+	frames := []string{
+		sseFrame("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"compaction","content":""}}`),
+		sseFrame("content_block_delta", fmt.Sprintf(`{"type":"content_block_delta","index":0,"delta":{"type":"compaction_delta","content":%q,"encrypted_content":"EqQBCkgIARAB"}}`, summary)),
+		sseFrame("content_block_stop", `{"type":"content_block_stop","index":0}`),
+	}
+	upstream := sseUpstream(t, frames)
+	defer upstream.Close()
+
+	engine := redact.New(store, redact.DefaultDetectors()...)
+	upstreamURL, _ := url.Parse(upstream.URL)
+	srv := New(Config{Upstream: upstreamURL, Engine: engine})
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/v1/messages", "application/json", strings.NewReader(`{"stream":true,"messages":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	raw, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(raw), summary) {
+		t.Fatalf("compaction block content was modified; expected byte-identical passthrough of %q, got: %s", summary, raw)
+	}
+	if strings.Contains(string(raw), "widgetcorp-fixture.com") {
+		t.Fatalf("compaction block was detokenized: %s", raw)
+	}
+}
+
+// TestProxy_Streaming_BlockLeftOpenAtMessageEnd_HeldBackContentFlushed
+// is a regression test: a message can end with a block that never got
+// its content_block_stop -- a refusal cutting the response off mid-block,
+// an error event mid-stream, or the connection just closing -- and
+// whatever that block was still holding back used to be silently
+// dropped: the tail of a text block (here, a whole token at its end) or
+// a tool call's entire buffered input. Claude Code echoes such a partial
+// back when it continues on a fallback model, so the client must get
+// all of it, detokenized, and before the frame that ends the message.
+func TestProxy_Streaming_BlockLeftOpenAtMessageEnd_HeldBackContentFlushed(t *testing.T) {
+	refusal := sseFrame("message_delta", `{"type":"message_delta","delta":{"stop_reason":"refusal","stop_details":{"type":"refusal","category":"cyber","fallback_credit_token":"fct_1","fallback_has_prefill_claim":true}},"usage":{"output_tokens":5}}`) +
+		sseFrame("message_stop", `{"type":"message_stop"}`)
+	errorEvent := sseFrame("error", `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`)
+
+	for _, tc := range []struct {
+		name   string
+		block  string // "text" or "tool_use"
+		ending string // frames after the open block; "" = connection closes
+		marker string // the frame that ends the message, which must come after the flushed content
+	}{
+		{"text, refusal", "text", refusal, `"message_delta"`},
+		{"text, error event", "text", errorEvent, `"overloaded_error"`},
+		{"text, connection closes", "text", "", ""},
+		{"tool_use, refusal", "tool_use", refusal, `"message_delta"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			store, err := tokenstore.Open(filepath.Join(dir, "tokens.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			token, err := store.GetOrCreateToken("widgetcorp-fixture.com", tokenstore.EntityDomain)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var frames []string
+			if tc.block == "text" {
+				// The token ends the text, so it's held back until the
+				// block closes -- which it never does.
+				frames = []string{
+					sseFrame("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
+					sseFrame("content_block_delta", fmt.Sprintf(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":%q}}`, "Host is "+token[:6])),
+					sseFrame("content_block_delta", fmt.Sprintf(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":%q}}`, token[6:])),
+				}
+			} else {
+				frames = []string{
+					sseFrame("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}}`),
+					sseFrame("content_block_delta", fmt.Sprintf(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":%q}}`, `{"command":"curl `+token+`"}`)),
+				}
+			}
+			if tc.ending != "" {
+				frames = append(frames, tc.ending)
+			}
+			upstream := sseUpstream(t, frames)
+			defer upstream.Close()
+
+			engine := redact.New(store, redact.DefaultDetectors()...)
+			upstreamURL, _ := url.Parse(upstream.URL)
+			ts := httptest.NewServer(New(Config{Upstream: upstreamURL, Engine: engine}))
+			defer ts.Close()
+
+			resp, err := http.Post(ts.URL+"/v1/messages", "application/json", strings.NewReader(`{"stream":true,"messages":[]}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			raw, _ := io.ReadAll(resp.Body)
+
+			texts, inputJSONs := readAllSSEDeltaText(t, bytes.NewReader(raw))
+			if tc.block == "text" {
+				if got, want := strings.Join(texts, ""), "Host is widgetcorp-fixture.com"; got != want {
+					t.Fatalf("client text = %q, want %q (full stream: %s)", got, want, raw)
+				}
+			} else {
+				if got, want := strings.Join(inputJSONs, ""), `{"command":"curl widgetcorp-fixture.com"}`; got != want {
+					t.Fatalf("client tool input = %q, want %q (full stream: %s)", got, want, raw)
+				}
+			}
+			if tc.marker != "" {
+				flushed := strings.Index(string(raw), "widgetcorp-fixture.com")
+				end := strings.Index(string(raw), tc.marker)
+				if end < 0 || flushed > end {
+					t.Fatalf("held-back content must reach the client before %s (content at %d, marker at %d): %s", tc.marker, flushed, end, raw)
+				}
+			}
+		})
 	}
 }
 

@@ -64,9 +64,14 @@ See [Tokens and the live console](../tokens.md#the-live-console).
 
 ## `--listen is not a loopback address; refusing to bind`
 
-Only `127.0.0.1`, `::1` and `localhost` are accepted. The bare `:8787`
-shorthand is refused on purpose: it genuinely binds every interface, and
-this proxy handles real client data in transit.
+By default only `127.0.0.1`, `::1` and `localhost` are accepted. The bare
+`:8787` shorthand is refused on purpose: it genuinely binds every
+interface, and this proxy handles real client data with no
+authentication in front of it.
+
+If Claude Code really does run on another machine, add
+`--allow-non-loopback` and read the warning it prints first; see
+[Running Claude Code on another machine](../engagements.md#running-claude-code-on-another-machine).
 
 ## Claude Code isn't going through the proxy
 
@@ -108,9 +113,9 @@ level=WARN msg="current directory matches a block-list pattern and WILL be sent
 to the upstream API unredacted..."
 ```
 
-Your working directory is named after the client. Claude Code puts its
-working directory into a part of every request the proxy deliberately
-never scans, so that name reaches the model on every request regardless
+Your working directory is named after the client. Claude Code puts a
+name built from its working directory into a part of every request the
+proxy deliberately never scans, so that name reaches the model on every request regardless
 of your rules.
 
 There is no fix in the tool. Rename the folder to an engagement code and
@@ -151,15 +156,15 @@ cannot be rewritten. **Start a new conversation.**
 ## Something innocent is being redacted
 
 Over-redaction. The proxy inspects text with no notion of code
-structure, so something merely domain-shaped (`table.style`) can get
+structure, so something merely domain-shaped (`config.live`) can get
 tokenized.
 
 It costs nothing operationally, since the real value is substituted back
 before anything executes. To stop it:
 
 ```bash
-redactproxy rules allow "table.style"       # stop redacting it
-redactproxy tokens remove "table.style"     # drop the mapping already minted
+redactproxy rules allow "config.live"       # stop redacting it
+redactproxy tokens remove "config.live"     # drop the mapping already minted
 ```
 
 ## A rule I added isn't doing anything
@@ -222,7 +227,18 @@ returns an error rather than forwarding bytes. An unredacted forward is
 the one outcome this project treats as worse than a broken request.
 
 Check the proxy's output for the specific reason. A body over
-`--max-body-mb` (64 MiB by default) is a common one.
+`--max-body-mb` (64 MiB by default) is a common one. Another is
+`exhausted the IPv4 network token space`: the engagement has seen more
+than 512 distinct /24 networks, typically from a wide scan. Restart the
+proxy with `--extended-ipv4-pool`.
+
+## `403` with `refused by the local proxy`
+
+The request's `Host` header was a DNS name the proxy wasn't told about,
+or the request came from a web page. Point Claude Code at the proxy by
+IP address or `localhost`, or start the proxy with
+`--allow-host <name>` for the name you use. See the
+[CLI reference](./cli.md).
 
 ## `--upstream must be an absolute URL` / `must use http or https`
 

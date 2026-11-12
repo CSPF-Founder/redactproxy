@@ -161,8 +161,15 @@ const environmentContextPrefix = "As you answer the user's questions, you can us
 // section here is far more likely to be another fact like userEmail
 // than a second source of real file content -- protecting by default is
 // the better call specifically within this one wrapper.
+//
+// gitStatus is the snapshot Claude Code takes at the start of a
+// conversation: current branch, git user, changed files and recent
+// commit subjects. On an engagement those name the client as readily as
+// CLAUDE.md does ("acme-bank.com-pentest", "Add notes for the 10.1.2.3
+// portal test"), and the section went out unscanned on every request.
 var scannableContextSections = map[string]bool{
-	"claudeMd": true,
+	"claudeMd":  true,
+	"gitStatus": true,
 }
 
 var contextSectionHeaderRe = regexp.MustCompile(`(?m)^# (\S+)\n`)
@@ -375,8 +382,9 @@ func apply(raw []byte, paths []string, inputPaths []string, tf func(string) (str
 		raw        bool // newVal is already valid JSON text; splice verbatim, don't re-encode as a string
 	}
 	var changes []change
+	get := newSubtreeGetter(raw, root)
 	for _, p := range paths {
-		r := root.Get(p)
+		r := get(p)
 		orig := r.String()
 		newVal, err := tf(orig)
 		if err != nil {
@@ -428,6 +436,65 @@ func apply(raw []byte, paths []string, inputPaths []string, tf func(string) (str
 	}
 	out = append(out, raw[last:]...)
 	return out, nil
+}
+
+// newSubtreeGetter returns a lookup equivalent to root.Get(path), with
+// absolute byte offsets in Index, that resolves each path's first two
+// segments ("messages.12", "safeguards.0", "requests.3") once and looks
+// the rest up inside that subtree.
+//
+// gjson.Get walks the document from the top for every call, so a path
+// near the end of a large body re-reads everything before it. For one
+// body that cost is paths x body size: the auto-mode "safeguards" field
+// adds a few hundred string paths per request and sits after the whole
+// conversation, so measured on a 20-turn session's real requests it
+// nearly doubled the time spent redacting. With the prefix cached, each
+// lookup reads only its own message or field.
+//
+// Any result it cannot vouch for is left for apply's own check, which
+// compares the bytes at the reported offset with the value and falls
+// back to the slow per-path implementation on a mismatch, so this can
+// only ever make apply faster, not wrong.
+func newSubtreeGetter(raw []byte, root gjson.Result) func(path string) gjson.Result {
+	prefixes := map[string]gjson.Result{}
+	return func(path string) gjson.Result {
+		first := strings.IndexByte(path, '.')
+		second := -1
+		if first >= 0 {
+			if i := strings.IndexByte(path[first+1:], '.'); i >= 0 {
+				second = first + 1 + i
+			}
+		}
+		if second < 0 || strings.ContainsAny(path[:second], `\*?|#@`) {
+			return root.Get(path)
+		}
+		prefix, rest := path[:second], path[second+1:]
+		base, ok := prefixes[prefix]
+		if !ok {
+			base = root.Get(prefix)
+			prefixes[prefix] = base
+		}
+		if base.Index <= 0 || base.Index+len(base.Raw) > len(raw) {
+			return root.Get(path)
+		}
+		r := base.Get(rest)
+		// gjson reports a nested result's offset relative to the whole
+		// document (it adds the parent's own offset); an older version
+		// reported it relative to the parent. Accept whichever the bytes
+		// confirm, and otherwise take the slow lookup.
+		if matchesAt(raw, r.Index, r.Raw) {
+			return r
+		}
+		if matchesAt(raw, base.Index+r.Index, r.Raw) {
+			r.Index += base.Index
+			return r
+		}
+		return root.Get(path)
+	}
+}
+
+func matchesAt(raw []byte, at int, want string) bool {
+	return at > 0 && at+len(want) <= len(raw) && string(raw[at:at+len(want)]) == want
 }
 
 // applyPerPath is apply's fallback: leaf paths go through the original
@@ -619,35 +686,79 @@ func redactValue(v gjson.Result, tf func(string) (string, error)) (string, error
 // top-level field is excluded.
 func collectPaths(raw []byte) (paths []string, inputPaths []string, unknownType string) {
 	root := gjson.ParseBytes(raw)
+	note := func(t string) {
+		if t != "" && unknownType == "" {
+			unknownType = t
+		}
+	}
 
-	if msgs := root.Get("messages"); msgs.IsArray() {
+	note(collectMessagePaths(root, "", &paths, &inputPaths))
+
+	// Message Batches. A create-batch body holds one ordinary Messages
+	// request per entry under requests[].params, and each line of a
+	// batch's results holds one ordinary response under result.message.
+	// Neither was walked, so a batch client pointed at the proxy sent
+	// every conversation unredacted and got placeholders back.
+	if reqs := root.Get("requests"); reqs.IsArray() {
+		reqs.ForEach(func(ri, req gjson.Result) bool {
+			if params := req.Get("params"); params.IsObject() {
+				note(collectMessagePaths(params, fmt.Sprintf("requests.%d.params.", ri.Int()), &paths, &inputPaths))
+			}
+			return true
+		})
+	}
+	if msg := root.Get("result.message"); msg.IsObject() {
+		note(collectMessagePaths(msg, "result.message.", &paths, &inputPaths))
+	}
+
+	return paths, inputPaths, unknownType
+}
+
+// collectMessagePaths collects the paths for one Messages API request or
+// response object. prefix is that object's own gjson path with a
+// trailing dot, or "" when it is the body's root.
+func collectMessagePaths(obj gjson.Result, prefix string, paths *[]string, inputPaths *[]string) (unknownType string) {
+	note := func(t string) {
+		if t != "" && unknownType == "" {
+			unknownType = t
+		}
+	}
+
+	if msgs := obj.Get("messages"); msgs.IsArray() {
 		msgs.ForEach(func(mi, msg gjson.Result) bool {
-			base := fmt.Sprintf("messages.%d.content", mi.Int())
+			base := fmt.Sprintf("%smessages.%d.content", prefix, mi.Int())
 			content := msg.Get("content")
 
 			if content.Type == gjson.String {
-				paths = append(paths, base)
+				*paths = append(*paths, base)
 				return true
 			}
 			if content.IsArray() {
-				if t := collectBlockArrayPaths(content, base, &paths, &inputPaths); t != "" && unknownType == "" {
-					unknownType = t
-				}
+				note(collectBlockArrayPaths(content, base, paths, inputPaths))
 			}
 			return true
 		})
 	}
 
+	if tools := obj.Get("tools"); tools.IsArray() {
+		tools.ForEach(func(ti, tool gjson.Result) bool {
+			collectMCPToolPaths(tool, fmt.Sprintf("%stools.%d", prefix, ti.Int()), paths)
+			return true
+		})
+	}
+
+	if sg := obj.Get("safeguards"); sg.Exists() {
+		collectSafeguardStrings(sg, prefix+"safeguards", paths)
+	}
+
 	// Non-streaming responses are a single Message object with a
 	// top-level "content" array (no "messages" wrapper; the response
 	// IS the content, unlike a request body).
-	if content := root.Get("content"); content.IsArray() {
-		if t := collectBlockArrayPaths(content, "content", &paths, &inputPaths); t != "" && unknownType == "" {
-			unknownType = t
-		}
+	if content := obj.Get("content"); content.IsArray() {
+		note(collectBlockArrayPaths(content, prefix+"content", paths, inputPaths))
 	}
 
-	return paths, inputPaths, unknownType
+	return unknownType
 }
 
 // collectBlockArrayPaths applies the per-block-type routing rules (text,
@@ -692,6 +803,26 @@ func collectBlockArrayPaths(blocks gjson.Result, basePath string, paths *[]strin
 						*paths = append(*paths, fmt.Sprintf("%s.content.%d.text", blockBase, ti.Int()))
 					case skipBlockTypes[subType]:
 						// intentionally skipped, e.g. an image sub-block
+					case subType == "tool_reference":
+						// Client-side tool search (Claude Code's
+						// ToolSearch) returns these to load a deferred
+						// tool. tool_name must match a tools[] entry
+						// byte-for-byte, so tokenizing it would break
+						// the reference, and the same name already goes
+						// upstream unredacted in tools[] and in
+						// tool_use's "name". Nothing to redact.
+						if p := shapeProblem(sub, "type", "tool_name", "cache_control"); p != "" && unknownType == "" {
+							unknownType = fmt.Sprintf("tool_reference (%s)", p)
+						}
+					case subType == "search_result":
+						srPaths, p := searchResultPaths(sub, fmt.Sprintf("%s.content.%d", blockBase, ti.Int()))
+						if p != "" {
+							if unknownType == "" {
+								unknownType = fmt.Sprintf("search_result (%s)", p)
+							}
+						} else {
+							*paths = append(*paths, srPaths...)
+						}
 					default:
 						if unknownType == "" {
 							unknownType = subType
@@ -702,6 +833,26 @@ func collectBlockArrayPaths(blocks gjson.Result, basePath string, paths *[]strin
 			}
 		case "tool_use", "mcp_tool_use":
 			*inputPaths = append(*inputPaths, blockBase+".input")
+		case "tool_addition", "tool_removal":
+			// Only an MCP tool's inline definition has anything to
+			// redact; see toolChangeProblem and collectMCPToolPaths.
+			if p := toolChangeProblem(block); p != "" {
+				if unknownType == "" {
+					unknownType = fmt.Sprintf("%s (%s)", typ, p)
+				}
+			} else if def := block.Get("tool.definition"); def.IsObject() {
+				collectMCPToolPaths(def, blockBase+".tool.definition", paths)
+			}
+		case "fallback":
+			// Nothing to redact; see fallbackProblem.
+			if p := fallbackProblem(block); p != "" && unknownType == "" {
+				unknownType = fmt.Sprintf("fallback (%s)", p)
+			}
+		case "compaction":
+			// Never touched, like thinking; see compactionProblem.
+			if p := compactionProblem(block); p != "" && unknownType == "" {
+				unknownType = fmt.Sprintf("compaction (%s)", p)
+			}
 		default:
 			if unknownType == "" {
 				unknownType = typ
@@ -710,6 +861,190 @@ func collectBlockArrayPaths(blocks gjson.Result, basePath string, paths *[]strin
 		return true
 	})
 	return unknownType
+}
+
+// shapeProblem reports why v isn't a JSON object whose keys all come
+// from allowed (empty string if it is).
+//
+// Used for the block types collectBlockArrayPaths passes through
+// without scanning. Skipping each of them is justified only by what its
+// known fields hold (tool names, model names, tool definitions -- none
+// of it client content), and that reasoning says nothing about a field
+// added later, which could hold anything. So a pass-through block with
+// any other key is reported as unrecognized instead, rather than riding
+// through unredacted just because its type is known.
+func shapeProblem(v gjson.Result, allowed ...string) string {
+	if !v.IsObject() {
+		return "not an object"
+	}
+	var problem string
+	v.ForEach(func(key, _ gjson.Result) bool {
+		if !slices.Contains(allowed, key.String()) {
+			problem = fmt.Sprintf("unexpected field %q", key.String())
+			return false
+		}
+		return true
+	})
+	return problem
+}
+
+// toolChangeProblem checks a tool_addition / tool_removal block
+// (mid-conversation tool changes) against its exact known shape, the
+// same way shapeProblem does for a single object. Claude Code sends
+// these in a role "system" message when an MCP server connects or
+// disconnects mid-session, naming the tool either by reference (a
+// tool_reference whose "name" must match a tools[] entry byte-for-byte)
+// or, for an addition only, by value (a tool_definition wrapping a whole
+// tools[] entry). Neither carries client content: the definition is the
+// same harness-authored data the top-level "tools" array holds, which
+// is never walked (see collectPaths), so passing it through unscanned
+// here is consistent with that rather than a new exposure.
+func toolChangeProblem(block gjson.Result) string {
+	if p := shapeProblem(block, "type", "tool", "cache_control"); p != "" {
+		return p
+	}
+	tool := block.Get("tool")
+	switch toolType := tool.Get("type").String(); toolType {
+	case "tool_reference":
+		if p := shapeProblem(tool, "type", "name"); p != "" {
+			return "tool reference " + p
+		}
+	case "tool_definition":
+		if block.Get("type").String() != "tool_addition" {
+			return "tool_definition outside a tool_addition"
+		}
+		if p := shapeProblem(tool, "type", "definition"); p != "" {
+			return "tool definition " + p
+		}
+		if !tool.Get("definition").IsObject() {
+			return "tool definition not an object"
+		}
+	default:
+		return fmt.Sprintf("unexpected tool type %q", toolType)
+	}
+	return ""
+}
+
+// fallbackProblem checks a fallback block against its exact known shape,
+// {"type":"fallback","from":{"model":...},"to":{"model":...}}. The API
+// puts one in an assistant turn wherever a server-side refusal fallback
+// switched models mid-response, and Claude Code may echo it back on the
+// next request. It's an audit marker naming two models: protocol data,
+// like the top-level "model" field, never client content.
+func fallbackProblem(block gjson.Result) string {
+	if p := shapeProblem(block, "type", "from", "to"); p != "" {
+		return p
+	}
+	for _, side := range []string{"from", "to"} {
+		v := block.Get(side)
+		if p := shapeProblem(v, "model"); p != "" {
+			return fmt.Sprintf("%q %s", side, p)
+		}
+		if v.Get("model").Type != gjson.String {
+			return fmt.Sprintf("%q model not a string", side)
+		}
+	}
+	return ""
+}
+
+// compactionProblem checks a compaction block (server-side compaction's
+// summary of the turns it replaces) against its exact known shape.
+//
+// It's never touched in either direction, for the same two reasons as
+// thinking blocks (see skipBlockTypes). The block is signed: the API
+// rejects it on replay if a single byte of its summary changed. And the
+// summary was written by the model from the conversation as the model
+// received it -- already tokenized -- so it holds nothing from the
+// local side that hasn't already gone upstream; leaving the response
+// copy untouched means the client echoes back exactly those bytes. Its
+// tool_changes (tool changes the summarized turns made, carried past
+// the summary) get the same shape check as standalone ones.
+func compactionProblem(block gjson.Result) string {
+	if p := shapeProblem(block, "type", "content", "encrypted_content", "tool_changes", "cache_control"); p != "" {
+		return p
+	}
+	if c := block.Get("content"); c.Exists() && c.Type != gjson.String && c.Type != gjson.Null {
+		return "content not a string"
+	}
+	if e := block.Get("encrypted_content"); e.Exists() && e.Type != gjson.String {
+		return "encrypted_content not a string"
+	}
+	tc := block.Get("tool_changes")
+	if !tc.Exists() {
+		return ""
+	}
+	if !tc.IsArray() {
+		return "tool_changes not an array"
+	}
+	var problem string
+	tc.ForEach(func(_, change gjson.Result) bool {
+		typ := change.Get("type").String()
+		if typ != "tool_addition" && typ != "tool_removal" {
+			problem = fmt.Sprintf("tool_changes entry of type %q", typ)
+			return false
+		}
+		if p := toolChangeProblem(change); p != "" {
+			problem = fmt.Sprintf("tool_changes %s %s", typ, p)
+			return false
+		}
+		return true
+	})
+	return problem
+}
+
+// searchResultPaths returns the content-carrying string paths of a
+// search_result sub-block at base (its source, title, and each text
+// block in its content), or a description of why it doesn't have the
+// exact known shape (empty string if it does).
+//
+// Unlike the pass-through types above, a search_result carries real
+// content and is always scanned. Claude Code produces one inside a
+// tool_result both for its own web search (public results, already
+// fetched on Anthropic's side) and for a local MCP tool that returns
+// search results -- an internal wiki or ticket search, say, whose
+// source URLs, titles and snippets are exactly the client data this
+// proxy exists to keep off the wire. Nothing in the block tells the two
+// apart, so both are treated as the MCP case. The strict shape check is
+// what makes that complete: a field this function doesn't know to scan
+// fails closed instead of going out unscanned.
+func searchResultPaths(sr gjson.Result, base string) (paths []string, problem string) {
+	if p := shapeProblem(sr, "type", "source", "title", "content", "citations", "cache_control"); p != "" {
+		return nil, p
+	}
+	for _, field := range []string{"source", "title"} {
+		if sr.Get(field).Type != gjson.String {
+			return nil, fmt.Sprintf("%s not a string", field)
+		}
+		paths = append(paths, base+"."+field)
+	}
+	content := sr.Get("content")
+	if !content.IsArray() {
+		return nil, "content not an array"
+	}
+	content.ForEach(func(ci, block gjson.Result) bool {
+		if p := shapeProblem(block, "type", "text"); p != "" {
+			problem = "content block " + p
+			return false
+		}
+		if block.Get("type").String() != "text" || block.Get("text").Type != gjson.String {
+			problem = "content block not a text block"
+			return false
+		}
+		paths = append(paths, fmt.Sprintf("%s.content.%d.text", base, ci.Int()))
+		return true
+	})
+	if problem != "" {
+		return nil, problem
+	}
+	if c := sr.Get("citations"); c.Exists() {
+		if p := shapeProblem(c, "enabled"); p != "" {
+			return nil, "citations " + p
+		}
+		if e := c.Get("enabled"); e.Exists() && e.Type != gjson.True && e.Type != gjson.False {
+			return nil, "citations.enabled not a boolean"
+		}
+	}
+	return paths, ""
 }
 
 // collectLeafStrings recursively finds every string leaf inside an
@@ -738,6 +1073,136 @@ func collectLeafStrings(v gjson.Result, path string, out *[]string) {
 		i := 0
 		v.ForEach(func(_, val gjson.Result) bool {
 			collectLeafStrings(val, join(fmt.Sprintf("%d", i)), out)
+			i++
+			return true
+		})
+	}
+}
+
+// mcpToolNamePrefix is how Claude Code names every tool that comes from
+// an MCP server: "mcp__<server>__<tool>".
+const mcpToolNamePrefix = "mcp__"
+
+// collectMCPToolPaths finds the operator-authored text in one tool
+// definition, if it belongs to an MCP server: its description, and the
+// descriptive strings in its input schema (see collectSchemaPaths).
+//
+// Only MCP tools, on purpose. The built-in tools' definitions are the
+// harness's own fixed text, the same kind of content as the top-level
+// "system" field and left alone for the same reason: they name CDNs and
+// claude.ai URLs the model has to read as written. An MCP server is
+// local infrastructure the operator runs, and a description such as
+// "Query the billing DB at db01.client.example" is client data that used
+// to go out with every request. Tokenizing it is stable from request to
+// request, like everything else here, so it does not disturb the prompt
+// cache the tool list sits at the front of.
+//
+// The tool's name is never touched: it is the identifier tool_use blocks
+// refer back to, and the API restricts its characters.
+func collectMCPToolPaths(tool gjson.Result, base string, paths *[]string) {
+	if !strings.HasPrefix(tool.Get("name").String(), mcpToolNamePrefix) {
+		return
+	}
+	if tool.Get("description").Type == gjson.String {
+		*paths = append(*paths, base+".description")
+	}
+	collectSchemaPaths(tool.Get("input_schema"), base+".input_schema", paths)
+}
+
+// collectSchemaPaths walks a JSON Schema and collects the strings that
+// are free text or sample data: description and title, and every string
+// under default, const, enum and examples. Everything structural is left
+// alone -- property names, required, type, format, pattern, $ref -- so
+// the schema still validates the same inputs. A tokenized enum or
+// default stays consistent end to end: the model answers with the token,
+// and the response path restores the real value before the tool runs.
+//
+// It has to follow the schema's own structure instead of matching key
+// names anywhere, because a property can itself be called "description"
+// or "default".
+func collectSchemaPaths(schema gjson.Result, path string, paths *[]string) {
+	if !schema.IsObject() {
+		return
+	}
+	each := func(v gjson.Result, base string) {
+		i := 0
+		v.ForEach(func(key, child gjson.Result) bool {
+			if v.IsArray() {
+				collectSchemaPaths(child, fmt.Sprintf("%s.%d", base, i), paths)
+				i++
+			} else {
+				collectSchemaPaths(child, base+"."+escapeGJSONKey(key.String()), paths)
+			}
+			return true
+		})
+	}
+	schema.ForEach(func(key, val gjson.Result) bool {
+		k := key.String()
+		sub := path + "." + escapeGJSONKey(k)
+		switch k {
+		case "description", "title":
+			if val.Type == gjson.String {
+				*paths = append(*paths, sub)
+			}
+		case "default", "const", "enum", "examples":
+			collectLeafStrings(val, sub, paths)
+		case "properties", "patternProperties", "$defs", "definitions", "dependentSchemas",
+			"anyOf", "oneOf", "allOf", "prefixItems":
+			// A map of name -> schema, or a list of schemas.
+			if val.IsObject() || val.IsArray() {
+				each(val, sub)
+			}
+		case "items", "additionalProperties", "not", "if", "then", "else", "contains", "propertyNames":
+			// One schema ("items" may also be a list in older drafts).
+			if val.IsArray() {
+				each(val, sub)
+			} else {
+				collectSchemaPaths(val, sub, paths)
+			}
+		}
+		return true
+	})
+}
+
+// safeguardProtocolKeys are the keys under "safeguards" whose values
+// are protocol, not local context: the check's own type tags, and the
+// tool_use IDs a prior turn's context is attached to, which must keep
+// matching the IDs in "messages" byte for byte.
+var safeguardProtocolKeys = map[string]bool{
+	"type":         true,
+	"tool_use_ids": true,
+}
+
+// collectSafeguardStrings finds every string value under the top-level
+// "safeguards" request field, except those under safeguardProtocolKeys.
+//
+// In auto mode Claude Code sends this field so the server can review
+// tool calls itself, and its classifier_context carries a copy of local
+// state the conversation also describes: the working directory, the git
+// remote, the operator's permission allow/deny rules and auto-mode
+// environment notes. Those are exactly where an engagement's hostnames,
+// IPs and repository names turn up, and the copies in "messages" are
+// already tokenized, so leaving this field alone sent the real values
+// next to their tokens. Its shape is versioned by Claude Code ("v") and
+// grows over time, so it is walked generically rather than against a
+// field allowlist: an unknown field gets scanned instead of either
+// slipping through or blocking every auto-mode request. Object keys are
+// left alone; here they are the schema's own field names.
+func collectSafeguardStrings(v gjson.Result, path string, out *[]string) {
+	switch {
+	case v.Type == gjson.String:
+		*out = append(*out, path)
+	case v.IsObject():
+		v.ForEach(func(key, val gjson.Result) bool {
+			if !safeguardProtocolKeys[key.String()] {
+				collectSafeguardStrings(val, path+"."+escapeGJSONKey(key.String()), out)
+			}
+			return true
+		})
+	case v.IsArray():
+		i := 0
+		v.ForEach(func(_, val gjson.Result) bool {
+			collectSafeguardStrings(val, fmt.Sprintf("%s.%d", path, i), out)
 			i++
 			return true
 		})

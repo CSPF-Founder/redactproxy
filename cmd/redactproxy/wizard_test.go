@@ -808,3 +808,96 @@ func TestPromptLines_NamePromptDoesNotMarkEntriesAsDomains(t *testing.T) {
 		t.Fatalf("expected the collected entry NOT to be marked IsDomain, got %+v", entries)
 	}
 }
+
+// TestAddPromptReminderHook: the opt-in hook is added without disturbing
+// the rest of the settings or anyone else's hooks, and adding it again
+// replaces it rather than stacking a second copy.
+func TestAddPromptReminderHook(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.local.json")
+	initial := `{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:8787"},"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"echo mine"}]}],"Stop":[{"hooks":[{"type":"command","command":"echo bye"}]}]}}`
+	if err := os.WriteFile(path, []byte(initial), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := addPromptReminderHook(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Env   map[string]string `json:"env"`
+		Hooks map[string][]struct {
+			Hooks []struct{ Type, Command string } `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("settings no longer valid JSON: %v\n%s", err, data)
+	}
+	if got.Env["ANTHROPIC_BASE_URL"] != "http://127.0.0.1:8787" || len(got.Hooks["Stop"]) != 1 {
+		t.Fatalf("unrelated settings changed: %s", data)
+	}
+	ups := got.Hooks["UserPromptSubmit"]
+	if len(ups) != 2 || ups[0].Hooks[0].Command != "echo mine" {
+		t.Fatalf("expected the existing hook kept and exactly one reminder added, got: %s", data)
+	}
+	cmd := ups[1].Hooks[0].Command
+	if ups[1].Hooks[0].Type != "command" || !strings.HasPrefix(cmd, "echo '"+promptReminderMarker) || strings.Count(cmd, "'") != 2 {
+		t.Fatalf("unexpected reminder command: %q", cmd)
+	}
+	if info, _ := os.Stat(path); info.Mode().Perm() != 0o600 {
+		t.Fatalf("settings file mode %v, want 0600", info.Mode().Perm())
+	}
+}
+
+// TestOfferPromptReminder: asked with a default of no, added on yes or
+// when the flag pre-answers, never asked when the settings file was not
+// written or the hook is already there.
+func TestOfferPromptReminder(t *testing.T) {
+	newSettings := func(t *testing.T) string {
+		path := filepath.Join(t.TempDir(), "settings.local.json")
+		if err := os.WriteFile(path, []byte(`{"env":{}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	has := func(path string) bool {
+		data, _ := os.ReadFile(path)
+		return strings.Contains(string(data), promptReminderMarker)
+	}
+	cases := []struct {
+		name, input          string
+		wrote, flag, wantSet bool
+	}{
+		{"enter takes the default, no", "\n", true, false, false},
+		{"no", "n\n", true, false, false},
+		{"yes", "y\n", true, false, true},
+		{"flag adds it without asking", "", true, true, true},
+		{"settings not written, flag given", "", false, true, false},
+		{"settings not written, would have said yes", "y\n", false, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := newSettings(t)
+			offerPromptReminder(bufio.NewReader(strings.NewReader(tc.input)), path, tc.wrote, tc.flag)
+			if has(path) != tc.wantSet {
+				t.Fatalf("hook present = %v, want %v", has(path), tc.wantSet)
+			}
+		})
+	}
+
+	t.Run("already present is left alone and not asked", func(t *testing.T) {
+		path := newSettings(t)
+		if err := addPromptReminderHook(path); err != nil {
+			t.Fatal(err)
+		}
+		before, _ := os.ReadFile(path)
+		offerPromptReminder(bufio.NewReader(strings.NewReader("n\n")), path, true, false)
+		after, _ := os.ReadFile(path)
+		if string(before) != string(after) {
+			t.Fatalf("settings changed:\n%s\n->\n%s", before, after)
+		}
+	})
+}

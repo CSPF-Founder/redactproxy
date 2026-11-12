@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -164,6 +165,11 @@ const (
 	// published key. Fully opaque, same as any other secret-shaped
 	// entity.
 	EntityGPPCPassword EntityType = "gpp_cpassword"
+	// EntityPassword tokens identify a plaintext password labeled by a
+	// password-like key in config, JSON, env or tool output
+	// (DB_PASSWORD=..., "password": "...", login: x password: y). Fully
+	// opaque: a password has no structure worth preserving.
+	EntityPassword EntityType = "password"
 )
 
 var (
@@ -193,6 +199,19 @@ type Store struct {
 	mu         sync.RWMutex
 	real2token map[string]string
 	token2real map[string]string
+
+	// deletes counts successful Delete calls; see DeleteCount.
+	deletes atomic.Uint64
+
+	// labelOnly holds every stored real value whose entity type is in
+	// labelOnlyTypes, mapped to that type; labelOnlyVer counts changes to
+	// it. Guarded by mu like the maps above. See LabelOnlyValues.
+	labelOnly    map[string]EntityType
+	labelOnlyVer atomic.Uint64
+
+	// extendedIPv4 is whether new IPv4 network tokens may come from
+	// 240.x.y once 198.18.0.0/15 is full; see SetExtendedIPv4Pool.
+	extendedIPv4 atomic.Bool
 
 	// spanTrie backs RegisterSpan/SafeFlushPoint/AlreadyTokenizedSpans
 	// (see spans.go) and carries its own lock, deliberately separate
@@ -272,6 +291,16 @@ func (s *Store) loadAll() error {
 			return err
 		}
 
+		if err := tx.Bucket(bucketMeta).ForEach(func(k, v []byte) error {
+			var meta entityMeta
+			if json.Unmarshal(v, &meta) == nil {
+				s.noteLabelOnly(string(k), meta.EntityType)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+
 		spans := tx.Bucket(bucketSpans)
 		return spans.ForEach(func(k, _ []byte) error {
 			s.spanTrie.insert(string(k))
@@ -323,7 +352,7 @@ func (s *Store) GetOrCreateToken(real string, et EntityType) (string, error) {
 	var token string
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		var genErr error
-		token, genErr = nextToken(tx, et, s.token2real)
+		token, genErr = nextToken(tx, et, s.token2real, s.ipNetworkLimit())
 		if genErr != nil {
 			return genErr
 		}
@@ -348,7 +377,61 @@ func (s *Store) GetOrCreateToken(real string, et EntityType) (string, error) {
 
 	s.real2token[real] = token
 	s.token2real[token] = real
+	s.noteLabelOnly(real, et)
 	return token, nil
+}
+
+// labelOnlyTypes are the entity types detected only by the label next to
+// the value -- "password: X", "Authorization: Bearer X", a keyword such
+// as client_secret -- rather than by a shape of their own. Once such a
+// value has been redacted, the operator sees it restored in Claude's
+// reply, and Claude Code sends that reply back as history on every later
+// request, often with the label no longer next to it ("the password is
+// X"). Detection alone would then let it through. LabelOnlyValues lets
+// the engine search for these values wherever they appear.
+var labelOnlyTypes = map[EntityType]bool{
+	EntityPassword:          true,
+	EntityPasswordHash:      true,
+	EntityBearerToken:       true,
+	EntityAWSSecretKey:      true,
+	EntityGPPCPassword:      true,
+	EntityBitbucket:         true,
+	EntityItsdangerousToken: true,
+}
+
+// noteLabelOnly records real if et is a label-only type. Callers hold mu
+// or are still single-threaded (loadAll).
+func (s *Store) noteLabelOnly(real string, et EntityType) {
+	if !labelOnlyTypes[et] {
+		return
+	}
+	if s.labelOnly == nil {
+		s.labelOnly = map[string]EntityType{}
+	}
+	if _, ok := s.labelOnly[real]; ok {
+		return
+	}
+	s.labelOnly[real] = et
+	s.labelOnlyVer.Add(1)
+}
+
+// LabelOnlyValues returns every stored value of a label-only type (see
+// labelOnlyTypes) with its type, and a version that changes whenever the
+// set does, so a caller can cache whatever it builds from the set.
+func (s *Store) LabelOnlyValues() (map[string]EntityType, uint64) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]EntityType, len(s.labelOnly))
+	for k, v := range s.labelOnly {
+		out[k] = v
+	}
+	return out, s.labelOnlyVer.Load()
+}
+
+// LabelOnlyVersion is LabelOnlyValues' version alone, without copying the
+// set.
+func (s *Store) LabelOnlyVersion() uint64 {
+	return s.labelOnlyVer.Load()
 }
 
 // Entry describes one real<->token mapping and its metadata: the unit
@@ -423,5 +506,36 @@ func (s *Store) Delete(real string) (bool, error) {
 
 	delete(s.real2token, real)
 	delete(s.token2real, token)
+	if _, ok := s.labelOnly[real]; ok {
+		delete(s.labelOnly, real)
+		s.labelOnlyVer.Add(1)
+	}
+	s.deletes.Add(1)
 	return true, nil
+}
+
+// SetExtendedIPv4Pool chooses what happens when an engagement has used
+// all 512 network tokens in 198.18.0.0/15: off (the default), the next
+// new network fails closed; on, tokens continue in 240.x.y. It only
+// governs minting. Tokens already stored, from either range, keep
+// resolving in both directions whatever this is set to.
+func (s *Store) SetExtendedIPv4Pool(on bool) {
+	s.extendedIPv4.Store(on)
+}
+
+func (s *Store) ipNetworkLimit() uint32 {
+	if s.extendedIPv4.Load() {
+		return ExtendedIPNetworks
+	}
+	return DefaultIPNetworks
+}
+
+// DeleteCount reports how many mappings have been deleted from this
+// store since it was opened. It only ever grows. Anything that caches
+// tokenized text has to treat a change here as invalidating its cache: a
+// cached output can still contain the deleted token, which no longer
+// detokenizes, so the model's reply would reach the operator with a
+// placeholder in it.
+func (s *Store) DeleteCount() uint64 {
+	return s.deletes.Load()
 }

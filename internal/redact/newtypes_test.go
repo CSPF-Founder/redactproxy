@@ -3,6 +3,7 @@ package redact
 import (
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -96,6 +97,163 @@ func TestBearerToken_BareAPIKeyWithLabel_RoundTrip(t *testing.T) {
 	}
 	if back := e.Detokenize(out); back != in {
 		t.Fatalf("round-trip mismatch:\n  in:   %q\n  out:  %q\n  back: %q", in, out, back)
+	}
+}
+
+// TestBearerToken_EnvVarStyleKeywordAndOAuthClientCredentials is a
+// regression for a real leak: a credential keyword inside an
+// env-var-style name (REACT_APP_WSO2_CLIENT_SECRET) never matched, since
+// "_" left no \b in front of the keyword, so the value went out as-is.
+// Also covers the OAuth client id/secret keywords added alongside.
+func TestBearerToken_EnvVarStyleKeywordAndOAuthClientCredentials(t *testing.T) {
+	cases := map[string]string{
+		`REACT_APP_WSO2_CLIENT_SECRET:"Ab3kZ9qTdX0mNoP1rStUvWxYz01a"`: "Ab3kZ9qTdX0mNoP1rStUvWxYz01a",
+		`export MY_SERVICE_API_KEY=sk9Fh2Kd8Lm3Pq7Rt5Vw1Xy4Za6`:       "sk9Fh2Kd8Lm3Pq7Rt5Vw1Xy4Za6",
+		`client_id=Qq7WmZ3kLp9XvB2nRt5YcH8dFj4s`:                      "Qq7WmZ3kLp9XvB2nRt5YcH8dFj4s",
+		`"consumerSecret": "Zr8Kq2Wm5Np9Xt3Lv7Bd1Hs6Jc4"`:             "Zr8Kq2Wm5Np9Xt3Lv7Bd1Hs6Jc4",
+		`WSO2_CONSUMER_KEY = Hn4Tz8Qw2Lp6Xc9Vb3Mk7Rd5Fy1`:             "Hn4Tz8Qw2Lp6Xc9Vb3Mk7Rd5Fy1",
+		"oauth:\n  client-secret: Pm2Lq8Xz4Wn6Kt9Rb3Vc7Hd5Jy1\n":      "Pm2Lq8Xz4Wn6Kt9Rb3Vc7Hd5Jy1",
+	}
+	for in, secret := range cases {
+		e := newTypesEngine(t)
+		out, err := e.Tokenize(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(out, secret) {
+			t.Fatalf("credential leaked: %q -> %q", in, out)
+		}
+		if !strings.Contains(out, tokenstore.TokenBearerPrefix) {
+			t.Fatalf("expected the bearer placeholder, got %q", out)
+		}
+		if back := e.Detokenize(out); back != in {
+			t.Fatalf("round-trip mismatch:\n  in:   %q\n  out:  %q\n  back: %q", in, out, back)
+		}
+	}
+}
+
+// TestBearerToken_KeywordInsideLongerWordLeftAlone is the false-positive
+// guard for the delimiter change above: the keyword must still be a
+// whole word between non-alphanumerics, so "client_identity" is not
+// "client_id", and a digit-free value next to a matching key is still
+// treated as a name, not a secret.
+func TestBearerToken_KeywordInsideLongerWordLeftAlone(t *testing.T) {
+	cases := []string{
+		"client_identity_provider: Okta2024TenantForStaffLogin",
+		"apikeys_rotated_count: 20240501123456789012",
+		"MY_CLIENT_SECRET_SOURCE=VAULT_PATH_FOR_PRODUCTION_SECRETS",
+	}
+	for _, in := range cases {
+		e := newTypesEngine(t)
+		out, err := e.Tokenize(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(out, tokenstore.TokenBearerPrefix) {
+			t.Fatalf("expected no credential placeholder for %q, got %q", in, out)
+		}
+	}
+}
+
+// TestBasicAuth_CredentialRedacted: an HTTP Basic credential is just
+// base64 of "user:password", so it carries the password in reversible
+// form, and used to go upstream as-is (only "Bearer" was handled).
+func TestBasicAuth_CredentialRedacted(t *testing.T) {
+	cases := map[string]string{
+		"Authorization: Basic UXE3VzpzZWNyZXQ=":                                    "UXE3VzpzZWNyZXQ=",
+		`curl -H "Authorization: Basic YWRtaW46UEBzc3cwcmQh" https://target/admin`: "YWRtaW46UEBzc3cwcmQh",
+		"authorization: basic c3ZjOmh1bnRlcjI=\r\n":                                "c3ZjOmh1bnRlcjI=",
+	}
+	for in, cred := range cases {
+		e := newTypesEngine(t)
+		out, err := e.Tokenize(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(out, cred) {
+			t.Fatalf("basic credential leaked: %q -> %q", in, out)
+		}
+		if !strings.Contains(out, tokenstore.TokenBearerPrefix) {
+			t.Fatalf("expected the bearer placeholder, got %q", out)
+		}
+		if back := e.Detokenize(out); back != in {
+			t.Fatalf("round-trip mismatch:\n  in:   %q\n  out:  %q\n  back: %q", in, out, back)
+		}
+	}
+}
+
+// TestBasicAuth_NonCredentialLeftAlone: "Basic" followed by something
+// that doesn't decode to "user:password" is left untouched.
+func TestBasicAuth_NonCredentialLeftAlone(t *testing.T) {
+	cases := []string{
+		"Basic authentication is enabled on /admin",
+		`WWW-Authenticate: Basic realm="Restricted"`,
+		"Basic SGVsbG8gV29ybGQ= is just base64 of a greeting",
+		"Basic blocks were reviewed",
+	}
+	for _, in := range cases {
+		e := newTypesEngine(t)
+		out, err := e.Tokenize(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out != in {
+			t.Fatalf("expected %q untouched, got %q", in, out)
+		}
+	}
+}
+
+// TestPassword_LabeledValueRedacted covers secrets.password: a
+// human-chosen password next to a password-like key, in the shapes a
+// pentest actually turns up (env/config dumps, JSON, YAML, tool output),
+// where no other detector fires because the value has no shape of its
+// own. Only the value is replaced; the key, separator and quotes stay,
+// so the model still sees well-formed config/JSON.
+func TestPassword_LabeledValueRedacted(t *testing.T) {
+	cases := []struct{ in, secret, keep string }{
+		{`password: "Example@123"`, "Example@123", `password: "`},
+		{`STRAPI_ADMIN_PASSWORD=Strapi#Adm1n@123`, "Strapi#Adm1n@123", `STRAPI_ADMIN_PASSWORD=`},
+		{`{"username":"svc_sms","password":"Gw8!smsPass2024"}`, "Gw8!smsPass2024", `{"username":"svc_sms","password":"`},
+		{"db:\n  user: app\n  pass_word: unused\n  password: 'S3cr3t pass phrase'\n", "S3cr3t pass phrase", "  password: '"},
+		{`[22][ssh] host: 10.0.0.5   login: admin   password: admin123`, "admin123", `password: `},
+		{`export DB_PASS=hunter2!`, "hunter2!", `export DB_PASS=`},
+		{`const dbPassword = "Winter2026!";`, "Winter2026!", `const dbPassword = "`},
+		{`'passwd' => 'pa55w0rd',`, "pa55w0rd", `'passwd' => '`},
+		{`https://app.example/login?user=admin&db_pass=Qwerty123&next=/`, "Qwerty123", `&db_pass=`},
+	}
+	for _, tc := range cases {
+		e := newTypesEngine(t)
+		out, err := e.Tokenize(tc.in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(out, tc.secret) {
+			t.Fatalf("password leaked: %q -> %q", tc.in, out)
+		}
+		if !strings.Contains(out, tc.keep+tokenstore.TokenPasswordPrefix) {
+			t.Fatalf("expected %q followed by the password placeholder, got %q", tc.keep, out)
+		}
+		if back := e.Detokenize(out); back != tc.in {
+			t.Fatalf("round-trip mismatch:\n  in:   %q\n  out:  %q\n  back: %q", tc.in, out, back)
+		}
+	}
+}
+
+// TestPassword_SameValueSameToken: like every other entity, a password
+// maps to one stable placeholder for the engagement, wherever it shows up.
+func TestPassword_SameValueSameToken(t *testing.T) {
+	e := newTypesEngine(t)
+	a, err := e.Tokenize(`DB_PASSWORD=Example@123`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := e.Tokenize(`{"password": "Example@123"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokA := a[strings.Index(a, tokenstore.TokenPasswordPrefix):]
+	if !strings.Contains(b, tokA) {
+		t.Fatalf("same password got different placeholders: %q vs %q", a, b)
 	}
 }
 
@@ -871,16 +1029,19 @@ func TestConnString_ADOStyleRoundTripAndContextGate(t *testing.T) {
 	}
 
 	// The narrower gate: a bare "password=" with no nearby Server=/Data
-	// Source=/Uid= context must NOT be treated as a connection string;
-	// this is deliberately NOT the general "context-anchored generic
-	// secret" detector that was declined elsewhere.
+	// Source=/Uid= context must NOT be treated as a connection string.
+	// It is still a password, though, and secrets.password claims it with
+	// its own placeholder (see passwordKeyRe).
 	proseIn := "the wiki says the default password=admin123 for the demo box"
 	proseOut, err := e.Tokenize(proseIn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if proseOut != proseIn {
-		t.Fatalf("a bare 'password=' with no connection-string context should pass through untouched, got %q", proseOut)
+	if strings.Contains(proseOut, tokenstore.TokenConnStringMarker) {
+		t.Fatalf("a bare 'password=' with no connection-string context must not be treated as a connection string, got %q", proseOut)
+	}
+	if want := "the wiki says the default password=" + tokenstore.TokenPasswordPrefix; !strings.HasPrefix(proseOut, want) {
+		t.Fatalf("expected the bare password redacted as a password, got %q", proseOut)
 	}
 }
 
@@ -1442,5 +1603,143 @@ func TestGPPCPassword_RoundTrip(t *testing.T) {
 	}
 	if back := e.Detokenize(out); back != in {
 		t.Fatalf("round-trip mismatch:\n  in:   %q\n  out:  %q\n  back: %q", in, out, back)
+	}
+}
+
+// TestVendorKeys_RedactedWithoutAKeyword: vendor-prefixed keys with no
+// dedicated detector are caught on shape alone, in prose with no
+// credential keyword nearby, and round-trip.
+func TestVendorKeys_RedactedWithoutAKeyword(t *testing.T) {
+	body := "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdefghijklmnopqrstuvwxyz"
+	secrets := map[string]string{
+		"google oauth secret": googleOAuthSecretPrefix + body[:28],
+		"google oauth token":  googleOAuthTokenPrefix + body[:60],
+		"hugging face":        huggingFacePrefix + body[:34],
+		"shopify":             shopifyPrefix + "0123456789abcdef0123456789abcdef",
+		"pypi":                pypiPrefix + body[:50],
+		"databricks":          databricksPrefix + "0123456789abcdef0123456789abcdef",
+		"slack app":           slackAppPrefix + "1-A0ABCDEFGHI-1234567890123-" + body[36:] + body[:14],
+		"telegram bot":        telegramBotPrefix + body[:33],
+		"discord bot":         "MTA" + body[:21] + ".Gh" + body[:4] + "." + body[:38],
+		"entra client secret": body[:3] + "8Q~" + body[:34],
+	}
+	for name, secret := range secrets {
+		t.Run(name, func(t *testing.T) {
+			e, _ := newCorpusEngine(t)
+			in := "the scan output contained " + secret + " in a comment"
+			out, err := e.Tokenize(in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(out, secret) {
+				t.Fatalf("not redacted: %q", out)
+			}
+			if !strings.HasPrefix(out, "the scan output contained ") || !strings.HasSuffix(out, " in a comment") {
+				t.Fatalf("surrounding text changed: %q", out)
+			}
+			if back := e.Detokenize(out); back != in {
+				t.Fatalf("round trip: %q", back)
+			}
+		})
+	}
+}
+
+// TestVendorKeys_AzureSASSignature: in a shared access signature URL the
+// sig parameter is the credential. Only its value is replaced; the other
+// parameters stay readable.
+func TestVendorKeys_AzureSASSignature(t *testing.T) {
+	e, _ := newCorpusEngine(t)
+	sig := "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdefg%3D"
+	in := "GET /c/f?sv=2022-11-02&sr=b&sig=" + sig + "&se=2026-12-01 HTTP/1.1"
+	out, err := e.Tokenize(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, sig) || !strings.Contains(out, "sv=2022-11-02&sr=b&sig=") || !strings.Contains(out, "&se=2026-12-01") {
+		t.Fatalf("expected only the sig value replaced: %q", out)
+	}
+	if back := e.Detokenize(out); back != in {
+		t.Fatalf("round trip: %q", back)
+	}
+}
+
+// TestVendorKeys_NotOverMatched: near-misses of the vendor shapes stay.
+func TestVendorKeys_NotOverMatched(t *testing.T) {
+	for _, in := range []string{
+		"cache key hf_short and module hf_hub",
+		"dapi is the databricks api; dapiVersion = 2",
+		"timestamp 1234567890:AA is not a token",
+		"see page?sig=abc123 for the signature format",
+		"version v1.2.3.4 and file a.b.c",
+		"shpat_ tokens start with that prefix",
+	} {
+		e, _ := newCorpusEngine(t)
+		if out, _ := e.Tokenize(in); out != in {
+			t.Errorf("over-matched:\n  in:  %q\n  out: %q", in, out)
+		}
+	}
+}
+
+// TestBareHost_RedactedInHostPosition: an internal hostname with no dot
+// is redacted where it is unmistakably a host -- a URL's authority, or
+// after "@" with a port -- keeps one token across mentions, and
+// round-trips. The same word in running prose is not touched.
+func TestBareHost_RedactedInHostPosition(t *testing.T) {
+	cases := map[string]string{
+		"http://internalhost07:9090/path":         "internalhost07",
+		"curl -s https://homfinapp12c/login":      "homfinapp12c",
+		"jdbc:oracle:thin:@appdbnode02:1521/ORCL": "appdbnode02",
+		"git clone ssh://git@buildsrv3/repo.git":  "buildsrv3",
+		"mongodb://svc:x@mongo-node1:27017/app":   "mongo-node1",
+		`<a href="http://sisazcmsapp01">cms</a>`:  "sisazcmsapp01",
+		"proxy_pass http://APPNODE02:8080;":       "APPNODE02",
+	}
+	for in, host := range cases {
+		e, _ := newCorpusEngine(t)
+		out, err := e.Tokenize(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(strings.ToLower(out), strings.ToLower(host)) {
+			t.Errorf("host not redacted:\n  in:  %q\n  out: %q", in, out)
+			continue
+		}
+		if again, _ := e.Tokenize(out); again != out {
+			t.Errorf("token re-tokenized: %q -> %q", out, again)
+		}
+		if back := e.Detokenize(out); !strings.EqualFold(back, in) && !strings.Contains(in, "@mongo") && !strings.Contains(in, "svc:x") {
+			t.Errorf("round trip:\n  in:   %q\n  back: %q", in, back)
+		}
+	}
+
+	e, _ := newCorpusEngine(t)
+	first, _ := e.Tokenize("http://internalhost07:9090/a")
+	second, _ := e.Tokenize("then http://internalhost07/b")
+	tok := regexp.MustCompile(`tok[0-9a-f]{16}`)
+	if tok.FindString(first) == "" || tok.FindString(first) != tok.FindString(second) {
+		t.Fatalf("expected one stable token for the host: %q / %q", first, second)
+	}
+}
+
+// TestBareHost_OrdinaryNamesLeftAlone: no digit, too short, localhost,
+// compose-style service names, and anything outside a host position.
+func TestBareHost_OrdinaryNamesLeftAlone(t *testing.T) {
+	for _, in := range []string{
+		"curl http://localhost:8080/health",
+		"redis://redis:6379/0 and http://db:5432 and http://api/v1",
+		"http://backend/ready and http://nginx:80",
+		"ssh into sisazcmsapp01 next",
+		"the variable appnode02 is unused",
+		"email me @handle1 or see section 3:45",
+		"http://web1/ is too short a name to act on",
+		"import x from 'node:fs2'",
+		"postgres://host1:1,host2:2,host3:3 and http://server2/ in the docs",
+		"example.com/cycle v1.5.0/go.mod h1://AqZbyNHeLOKZB3J/UPPXaBvk3nCqvqVRbPk=",
+		"fetch http://AqZbyNHe7LOK/x",
+	} {
+		e, _ := newCorpusEngine(t)
+		if out, _ := e.Tokenize(in); out != in {
+			t.Errorf("changed:\n  in:  %q\n  out: %q", in, out)
+		}
 	}
 }

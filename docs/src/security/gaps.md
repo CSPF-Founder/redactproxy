@@ -14,18 +14,33 @@ instead.
 
 **The most important one, and the one redaction cannot fix.**
 
-Claude Code puts its working directory, and a project-memory directory
-name derived from it, into the `system` field of every request. That
-field is deliberately never scanned: it is Anthropic's own prompt
-boilerplate, and blanket-scanning it does more harm than good.
+Claude Code sends your working directory with every request, in more
+than one place:
+
+- **The environment details in `messages`**, and, in auto mode, the
+  `safeguards` field. Both are scanned, so the path there is redacted
+  wherever it matches a detector or one of your `rules block` entries.
+- **The project-memory directory name in the `system` field.** Claude
+  Code builds it from the path with every `/` and `.` turned into `-`,
+  so `~/clients/acme-bank-pentest` becomes
+  `-home-you-clients-acme-bank-pentest`. That field is deliberately never
+  scanned: it is Anthropic's own prompt boilerplate, and blanket-scanning
+  it does more harm than good.
 
 So a folder called `acme-bank-pentest` sends "acme bank" to the model on
 every single request, bypassing every block and allow rule no matter how
-thorough `rules.json` is. The redaction engine never sees that text.
+thorough `rules.json` is. A `rules block` entry covers the copies in
+`messages` and `safeguards`, but not the one in `system`, and turning
+dots into dashes keeps even a domain-named folder like `acme-bank.com`
+from looking like a domain there.
 
-There is no fix in the tool. There is nothing to tokenize against,
-because the path is not part of the body the proxy edits. **Name
-engagement folders after an engagement code, never after the client.**
+A domain inside a path is also not detected on its own: in
+`/home/you/acme-bank.com/notes` it is redacted only once the proxy has
+seen `acme-bank.com` somewhere else, in the same request or earlier, or
+it is on your block list.
+
+There is no fix in the tool for the `system` copy. **Name engagement
+folders after an engagement code, never after the client.**
 
 redactproxy checks for this. If your working directory matches one of
 your own block entries, the wizard warns when you set up and the proxy
@@ -50,6 +65,33 @@ Claude to decode to a file with `Bash` and read the file back, so the
 decoded content gets a normal pass through redaction instead of arriving
 unprotected in Claude's own output. See
 [Configuring Claude Code](../claude-code.md#the-claudemd-note).
+
+## PDFs, images and other files Claude reads whole
+
+When Claude Code reads a PDF or an image, it sends the file itself to
+the API as a binary attachment. The proxy cannot redact inside one:
+there is no safe way to rewrite text in a PDF, and none at all in a
+picture. A client report, a scanned contract or a screenshot of an
+admin panel goes out exactly as it is on disk.
+
+Don't have Claude read client PDFs or screenshots directly. Extract the
+text locally first (`pdftotext report.pdf report.txt`) and have Claude
+read the text file, which gets a normal pass through redaction.
+
+## Custom agent prompts and other system-prompt text
+
+The `system` field is never scanned, and it is not only Claude Code's
+own text. Anything you add to the system prompt travels in it as you
+wrote it:
+
+- the body of a custom agent file (`.claude/agents/<name>.md`), which
+  becomes the system prompt of every request that agent makes;
+- an output style;
+- `--system-prompt` and `--append-system-prompt`.
+
+Keep client names, hosts and addresses out of all of these. Put
+engagement details in `CLAUDE.md` or in the conversation, which are
+scanned.
 
 ## Names and prose
 
@@ -85,6 +127,20 @@ If a real value reaches the model some other way, the model can restate
 it in a thinking block, and that restatement is permanent for the life
 of the conversation. **Start a new conversation** if that happens.
 
+## Parts of the request that are not scanned
+
+Besides `system`, these fields go to the API as sent:
+
+- **MCP server and tool names.** A tool is named
+  `mcp__<server>__<tool>`, and the name is an identifier the API
+  matches on, so it cannot be rewritten. Don't name an MCP server after
+  the client. The tool's description and schema text are scanned.
+- **Built-in tool definitions.** They are Claude Code's own text.
+- **`mcp_servers`**, the API-side MCP connector: its URLs and
+  authorization tokens. Claude Code's ordinary local MCP servers do not
+  use this field.
+- **`stop_sequences`** and **`metadata`**.
+
 ## HTTP headers
 
 Forwarded verbatim, never inspected. This is what makes credential
@@ -116,7 +172,14 @@ exactly what is missing. See
 
 The opposite failure, and mostly harmless. The proxy inspects text with
 no notion of code structure, so something merely domain-shaped
-(`table.style`, where `.style` is a real suffix) can get tokenized.
+(`config.live`, where `.live` is a real suffix) can get tokenized.
+
+Two common code shapes are handled: names that look like filenames on a
+colliding TLD (`main.rs`, `server.py`, `table.style`), and method calls
+whose name is also a TLD (`datetime.now()`, `subprocess.run(...)`,
+`m.group(1)`), recognized by the `(` that follows. Plain attribute
+access (`config.live`, `user.email`) has no such signal and can still be
+tokenized.
 
 Operationally this costs nothing: the real value is substituted back
 before anything executes, on every response rather than just the first,
@@ -136,9 +199,23 @@ paths, `domain\username`, LDAP DN components). See CONTRIBUTING.md.
 
 ## Where rules do and don't reach back
 
-Rule changes only affect text tokenized from that point on. Adding a
-block rule does not scrub a value that already reached the model earlier
-in the same conversation. Start a fresh conversation if that matters.
+Claude Code resends the whole conversation on every request, with the
+real values in it, and the proxy redacts all of it each time. So a rule
+change applies to every request from then on, earlier turns included:
 
-Disabling a category likewise only gates future detection. Anything
-already tokenized keeps detokenizing correctly.
+- **Adding a block rule** scrubs the value from every later request,
+  earlier turns included. It cannot recall the requests that already
+  carried it. Start a fresh conversation if that matters.
+- **Disabling a category, or adding an allow entry, un-redacts.** The
+  next request sends the matching values from earlier turns in the
+  clear, even though earlier requests carried them tokenized. Make
+  these changes before a conversation starts, not in the middle of one.
+  Placeholders already minted keep detokenizing correctly either way.
+
+Any of these changes also rewrites earlier turns, which the API sees as
+an edited history. That costs one prompt-cache miss, and on models that
+bind thinking blocks to the conversation (Claude Opus 5.5 and Fable 5.1,
+for example) the API may drop or reject the earlier thinking blocks. If
+requests start failing after a rule change, start a fresh conversation.
+Upgrading redactproxy in the middle of a conversation has the same
+effect whenever the new version detects more, or less, than the old one.

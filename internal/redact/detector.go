@@ -19,11 +19,15 @@
 package redact
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"net/netip"
 	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/CSPF-Founder/redactproxy/internal/tokenstore"
 )
@@ -389,6 +393,9 @@ func (d domainDetector) Detect(text string) ([]Detection, error) {
 			if !d.forceAsDomain[registrable] && looksLikeBareFilename(text, matchStart, end, parts) {
 				continue
 			}
+			if !d.forceAsDomain[registrable] && looksLikeMethodCall(text, matchStart, cand.ToOrig(len(cand.Clean)), parts.suffix) {
+				continue
+			}
 			out = append(out, Detection{
 				Start: matchStart, End: end,
 				Lookups:           []lookup{{Real: registrable, Type: tokenstore.EntityDomain}},
@@ -652,6 +659,74 @@ func looksLikeBareFilename(text string, start, end int, parts domainParts) bool 
 	return true
 }
 
+// looksLikeMethodCall reports whether the domain candidate spanning
+// [start, end), with public suffix suffix, is really a call expression
+// in code: immediately followed by "(" ("datetime.datetime.now()",
+// "subprocess.run([...])", "OpenVPNPacket.build({"). The new-gTLD
+// program made hundreds of ordinary words real TLDs (.now, .run,
+// .group, .build, .app, ...), so "obj.method(" is syntactically a
+// domain, and tokenizing it broke scripts the model wrote.
+//
+// The "(" alone is not enough: tools do print a real hostname right
+// before one ("Connecting to db01.example.com(10.0.0.5)"), and a client
+// domain on a word gTLD ("acme.app(beta)") looks exactly like
+// "obj.app(". So the TLD must also be one of methodNameTLDs, words that
+// are far more often a method than a company's domain. An explicit
+// "scheme://" or "www." still wins, and so does an operator's own
+// `rules block --domain` entry (checked by the caller). Attribute access
+// without a call ("config.live", "arr.group;") has no "(" and is still
+// tokenized; see TestKnownAmbiguity_CcTLDExtensionCollision.
+//
+// The exemption is then narrowed by what a call chain cannot look like,
+// because the first version let "db01.corp.group(10.0.0.5)" through: a
+// label with a hyphen or a leading digit is not an identifier, and with
+// three or more labels a digit anywhere ("db01.corp.group(") or an IP
+// address as the first thing in the parentheses marks a hostname. What
+// remains ambiguous is a client domain on one of these few TLDs, written
+// with no digits or hyphens directly before "(" ("portal.acme.build(x)"
+// against "self.client.build(x)"); `rules block --domain` covers it.
+func looksLikeMethodCall(text string, start, end int, suffix string) bool {
+	if end >= len(text) || text[end] != '(' {
+		return false
+	}
+	if !methodNameTLDs[suffix] {
+		return false
+	}
+	candidate := strings.ToLower(text[start:end])
+	before := strings.ToLower(text[:start])
+	if strings.HasPrefix(candidate, "www.") || strings.HasSuffix(before, "://") {
+		return false
+	}
+	// A call chain is made of identifiers; a hostname often is not.
+	labels := strings.Split(candidate, ".")
+	hasDigit := false
+	for _, label := range labels {
+		if label == "" || strings.Contains(label, "-") || (label[0] >= '0' && label[0] <= '9') {
+			return false
+		}
+		hasDigit = hasDigit || strings.ContainsAny(label, "0123456789")
+	}
+	if len(labels) >= 3 && (hasDigit || startsWithIPv4Re.MatchString(text[end+1:])) {
+		return false
+	}
+	return true
+}
+
+// startsWithIPv4Re matches text that opens with a dotted-quad address,
+// as in the "(10.0.0.5)" a tool prints after a hostname.
+var startsWithIPv4Re = regexp.MustCompile(`^\s*\d{1,3}(?:\.\d{1,3}){3}\b`)
+
+// methodNameTLDs are real TLDs that are also everyday method names in
+// Python/JS/Go ("datetime.now()", "date.today()", "subprocess.run()",
+// "m.group(1)", "el.click()", "model.fit()"). Deliberately short: words
+// a company plausibly registers its domain under (.app, .dev, .store,
+// .page, .link, .live, .email, ...) stay out, since missing one of those
+// would leak a client domain, while a stray token in code is recoverable.
+var methodNameTLDs = map[string]bool{
+	"now": true, "today": true, "run": true, "build": true, "group": true,
+	"show": true, "watch": true, "fit": true, "click": true, "help": true,
+}
+
 // --- IPv4 ----------------------------------------------------------------
 
 var ipv4Re = regexp.MustCompile(`\b(?:25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])(?:\.(?:25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])){3}\b`)
@@ -662,12 +737,12 @@ func (ipv4Detector) Detect(text string) ([]Detection, error) {
 	var out []Detection
 	for _, loc := range ipv4Re.FindAllStringIndex(text, -1) {
 		val := text[loc[0]:loc[1]]
-		if strings.HasPrefix(val, tokenstore.TokenIPNetworkPrefix) {
-			continue // already a token
-		}
 		addr, err := netip.ParseAddr(val)
 		if err != nil {
 			continue // shouldn't happen given the regex, but never trust a match blindly
+		}
+		if tokenstore.IsIPv4PlaceholderAddr(addr) {
+			continue // already a token, or in a range tokens are minted from
 		}
 		if isReservedIP(addr) {
 			continue // loopback or an RFC 5737 documentation range
@@ -1045,7 +1120,19 @@ var bearerRe = regexp.MustCompile(`(?i)\bBearer[ \t]+([A-Za-z0-9_\-.~+/]{20,}={0
 // bearerDetector.Detect below, applied only to matches from this regex
 // (not bearerRe's tightly-framed "Bearer <token>" matches, which don't
 // need it and are left alone).
-var bareCredentialKeywordRe = regexp.MustCompile(`(?i:\bapi[ _-]?key\b|\baccess[ _-]?token\b|\bauth[ _-]?token\b|\bsecret[ _-]?key\b|\bclient[ _-]?secret\b|\bauth[ _-]?key\b|\baccess[ _-]?key\b|\bapi[ _-]?secret\b)(?:.|[\n\r]){0,200}?\b([A-Za-z0-9_-]{20,})\b`)
+//
+// The keyword is delimited by any non-alphanumeric character, not \b:
+// "_" is a word character to \b, so a keyword inside an env-var-style
+// name -- REACT_APP_WSO2_CLIENT_SECRET, MY_SERVICE_API_KEY, the most
+// common way a credential is labeled in a config dump -- had no word
+// boundary in front of it and never matched, and its value leaked. The
+// delimiters are consumed rather than asserted (RE2 has no lookbehind),
+// which is harmless: only capture group 1, the value, is ever used.
+//
+// client_id and consumer_key/consumer_secret are OAuth client
+// credentials (an id/secret pair, e.g. WSO2's), labeled exactly like the
+// API keys above.
+var bareCredentialKeywordRe = regexp.MustCompile(`(?i:(?:^|[^a-z0-9])(?:api[ _-]?key|access[ _-]?token|auth[ _-]?token|secret[ _-]?key|client[ _-]?secret|client[ _-]?id|consumer[ _-]?(?:key|secret)|auth[ _-]?key|access[ _-]?key|api[ _-]?secret)(?:$|[^a-z0-9]))(?:.|[\n\r]){0,200}?\b([A-Za-z0-9_-]{20,})\b`)
 
 // awsSecretValueShapeRe is the exact value shape awsSecretKeyKeywordRe
 // requires (40 base64-alphabet characters, no underscore/hyphen/tilde).
@@ -1066,6 +1153,32 @@ var bareCredentialKeywordRe = regexp.MustCompile(`(?i:\bapi[ _-]?key\b|\baccess[
 // (i.e. awsSecretKeyKeywordRe itself would also claim the identical
 // span), not just that the value happens to be the right shape.
 var awsSecretValueShapeRe = regexp.MustCompile(`^[A-Za-z0-9/+]{40}$`)
+
+// basicAuthRe matches an HTTP Basic credential: "Basic " then standard
+// base64 of "user:password". Unlike a bearer token it can be short (a
+// 4-char user and password encode to 12 characters), so the length
+// floor that keeps bearerRe precise doesn't apply; isBasicCredential
+// does that job instead, by decoding it.
+var basicAuthRe = regexp.MustCompile(`\b(?i:basic)[ \t]+([A-Za-z0-9+/]{4,}={0,2})(?:[^A-Za-z0-9+/=]|$)`)
+
+// isBasicCredential reports whether b64 really is a Basic credential: it
+// decodes as padded standard base64 to printable text containing the
+// ":" between user and password. Ordinary words after "Basic" ("Basic
+// authentication is enabled") fail this, so the detector never fires on
+// prose.
+func isBasicCredential(b64 string) bool {
+	// Padding is optional in practice: some clients strip the "=".
+	raw, err := base64.RawStdEncoding.DecodeString(strings.TrimRight(b64, "="))
+	if err != nil || !utf8.Valid(raw) || !bytes.ContainsRune(raw, ':') {
+		return false
+	}
+	for _, r := range string(raw) {
+		if !unicode.IsPrint(r) {
+			return false
+		}
+	}
+	return true
+}
 
 type bearerDetector struct{}
 
@@ -1097,6 +1210,11 @@ func (bearerDetector) Detect(text string) ([]Detection, error) {
 	}
 	for _, m := range bearerRe.FindAllStringSubmatchIndex(text, -1) {
 		claim(m[2], m[3]) // capture group 1: the token, not "Bearer "
+	}
+	for _, m := range basicAuthRe.FindAllStringSubmatchIndex(text, -1) {
+		if isBasicCredential(text[m[2]:m[3]]) {
+			claim(m[2], m[3]) // capture group 1: the credential, not "Basic "
+		}
 	}
 	for _, m := range bareCredentialKeywordRe.FindAllStringSubmatchIndex(text, -1) {
 		start, end := m[2], m[3]
@@ -1279,6 +1397,132 @@ var adMachineAccountDetector = capturedMatchDetector{machineAccountSecretsdumpRe
 var gppCPasswordRe = regexp.MustCompile(`(?i)\bcpassword\s*=\s*"([A-Za-z0-9+/]{16,}={0,2})"`)
 
 var gppCPasswordDetector = capturedMatchDetector{gppCPasswordRe, tokenstore.EntityGPPCPassword, tokenstore.TokenGPPCPasswordPrefix}
+
+// --- Labeled plaintext password -------------------------------------------
+
+// passwordKeyRe matches a password-like key and the separator after it,
+// ending exactly where the value starts: password / passwd / passphrase /
+// pwd as a whole word, optionally with a prefix ("DB_PASSWORD",
+// camelCase "dbPassword"), optionally quoted (JSON, YAML), then ":", "="
+// or "=>". "pass" counts only with a prefix ("DB_PASS", "dbPass"): on its
+// own it is an ordinary English word ("first pass: ...").
+// Run-together names in one case count too ("PGPASSWORD", "MYSQL_PWD",
+// "rootpassword"), since that is how the common environment variables
+// are spelled.
+//
+// Requiring the separator right after the key is what keeps prose out:
+// "the password is weak", "[sudo] password for kali:", and keys that
+// merely contain the word ("password_hash:", "min_password_length =")
+// never match. A real password has no shape of its own, so the label is
+// the only signal there is; this is the same keyword-anchoring as
+// bareCredentialKeywordRe, minus that detector's 20+ char / digit value
+// rule, which a human-chosen password ("Example@123") would never meet.
+var passwordKeyRe = regexp.MustCompile(`(?:^|[^A-Za-z0-9])(?:(?:[A-Za-z0-9]+[_-])*(?i:password|passwd|passphrase|pwd)|(?:[A-Za-z0-9]+[_-])+(?i:pass)|[a-z0-9]+(?:Password|Passwd|Passphrase|Pwd|Pass)|[A-Z0-9]+(?:PASSWORD|PASSWD|PWD)|[a-z0-9]+(?:password|passwd))["']?[ \t]*(?:=>|[:=])[ \t]*`)
+
+// passwordNonValues are values that sit next to a password key without
+// being a password: schema/type names (an OpenAPI example's
+// "password": "string"), nulls and flags, and redaction markers.
+var passwordNonValues = map[string]bool{
+	"string": true, "str": true, "text": true, "password": true, "passwd": true, "pwd": true,
+	"secret": true, "null": true, "nil": true, "none": true, "undefined": true,
+	"true": true, "false": true, "required": true, "optional": true, "hidden": true,
+	"redacted": true, "masked": true, "empty": true,
+}
+
+// passwordCodeIdentRe is an unquoted value that is a code reference, not
+// a literal: an identifier or dotted path with no digits ("None",
+// "password", "args.password", "settings.DB_PASSWORD"). A real password
+// written unquoted next to the key in code or config essentially always
+// has a digit or a symbol in it; one that is plain letters is the known,
+// accepted miss here, since in code it is far more often a variable.
+var passwordCodeIdentRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z_]*(?:\.[A-Za-z_][A-Za-z_]*)*$`)
+
+type passwordDetector struct{}
+
+func (passwordDetector) Detect(text string) ([]Detection, error) {
+	var out []Detection
+	for _, m := range passwordKeyRe.FindAllStringIndex(text, -1) {
+		start, end, ok := passwordValueSpan(text, m[1])
+		if !ok {
+			continue
+		}
+		out = append(out, simpleDetection(start, end, text[start:end], tokenstore.EntityPassword))
+	}
+	return out, nil
+}
+
+// passwordValueSpan returns the value that starts at pos (right after a
+// passwordKeyRe match), or ok=false when what's there isn't a literal
+// password (see passwordNonValues, passwordCodeIdentRe and the
+// placeholder checks below).
+func passwordValueSpan(text string, pos int) (start, end int, ok bool) {
+	if pos >= len(text) {
+		return 0, 0, false
+	}
+	quoted := false
+	switch q := text[pos]; q {
+	case '"', '\'', '`':
+		// Quoted: the value is everything up to the matching quote on
+		// the same line, so spaces and separators inside are kept.
+		quoted = true
+		start = pos + 1
+		end = start
+		for end < len(text) && text[end] != q && text[end] != '\n' {
+			if text[end] == '\\' && end+1 < len(text) {
+				end++
+			}
+			end++
+		}
+		if end >= len(text) || text[end] != q {
+			return 0, 0, false // unterminated: not a literal we can trust
+		}
+	default:
+		// Unquoted: up to whitespace or a character that ends a value in
+		// config, URL query and command-line syntax.
+		start = pos
+		end = start
+		for end < len(text) && !strings.ContainsRune(" \t\r\n\"'`,;&)}]<>", rune(text[end])) {
+			end++
+		}
+	}
+	val := text[start:end]
+	n := utf8.RuneCountInString(val)
+	if n < 4 || n > 200 {
+		return 0, 0, false
+	}
+	if strings.HasPrefix(val, tokenstore.TokenPasswordPrefix) || passwordNonValues[strings.ToLower(val)] {
+		return 0, 0, false
+	}
+	if isPasswordPlaceholder(val) {
+		return 0, 0, false
+	}
+	if !quoted && (passwordCodeIdentRe.MatchString(val) || strings.ContainsAny(val, "([{")) {
+		return 0, 0, false // a variable, call or index expression, not a literal
+	}
+	return start, end, true
+}
+
+// isPasswordPlaceholder reports a value that stands in for a password
+// rather than being one: a mask ("********", "xxxx"), a template or
+// variable reference ("${DB_PASS}", "{{ vault_pw }}", "$PASS",
+// "%PASS%", "%(pw)s", "<password>"), or a filesystem path, which is what
+// "PWD=" holds in any environment dump.
+func isPasswordPlaceholder(val string) bool {
+	if strings.Trim(val, val[:1]) == "" {
+		return true // one repeated character
+	}
+	switch {
+	case strings.Contains(val, "${"), strings.Contains(val, "{{"), strings.Contains(val, "%("),
+		strings.Contains(val, "$("),
+		strings.HasPrefix(val, "$"),
+		strings.HasPrefix(val, "%") && strings.HasSuffix(val, "%"),
+		strings.HasPrefix(val, "<") && strings.HasSuffix(val, ">"),
+		strings.HasPrefix(val, "/"), strings.HasPrefix(val, "~/"),
+		strings.HasPrefix(val, "./"), strings.HasPrefix(val, "../"):
+		return true
+	}
+	return false
+}
 
 // --- PEM private key block --------------------------------------------
 
@@ -1551,15 +1795,14 @@ var sendGridKeyDetector = wholeMatchDetector{sendGridKeyRe, tokenstore.EntitySen
 //  2. ADO.NET/ODBC-style: semicolon-separated "Key=Value;..." pairs, e.g.
 //     "Server=10.0.0.5;Database=erp;User Id=sa;Password=...;", common in
 //     .NET/Windows environments. There's no fixed scheme prefix to anchor
-//     on here, only a "Password="/"Pwd=" keyword, which is exactly the
-//     shape of "context-anchored generic secret" detection that was
-//     deliberately deferred elsewhere in this package as too broad/
-//     high-false-positive on its own. The gate here is narrower than that
-//     general case: a bare "password=" is only treated as a real
-//     connection-string credential if a server/host-identifying key
-//     (Server=/Data Source=/Uid=/User Id=) also appears nearby in the
-//     same string, i.e. this only fires on the specific DB-connection-
-//     string shape, not on any "password=" mention anywhere in text.
+//     on here, only a "Password="/"Pwd=" keyword. A bare "password=" is
+//     only treated as a connection-string credential if a server/host-
+//     identifying key (Server=/Data Source=/Uid=/User Id=) also appears
+//     nearby in the same string, i.e. this only fires on the specific
+//     DB-connection-string shape. Any other labeled password is
+//     passwordDetector's (secrets.password); where both match the same
+//     value, this detector wins the tie (it is registered first; see
+//     resolveOverlaps), keeping the connection-string placeholder.
 var connStringURLRe = regexp.MustCompile(`\b((?:jdbc:)?(?:mongodb(?:\+srv)?|postgres(?:ql)?|mysql|rediss?|amqps?|ldaps?|ftp|sqlserver|https?)://)([^\s:@/'"]{1,64}:[^\s@'"]{1,128}@[^\s/'"]+)`)
 
 var adoPasswordRe = regexp.MustCompile(`(?i)\b(?:password|pwd)\s*=\s*([^;'"\s]{1,128})`)
@@ -1697,3 +1940,112 @@ var anthropicKeyDetector = wholeMatchDetector{anthropicKeyRe, tokenstore.EntityA
 var razorpayRe = regexp.MustCompile(`(?i)\brzp_live_[A-Za-z0-9]{14}\b`)
 
 var razorpayDetector = wholeMatchDetector{razorpayRe, tokenstore.EntityRazorpay, tokenstore.TokenRazorpayPrefix}
+
+// --- Other vendor-prefixed keys -------------------------------------------
+
+// vendorKeyPatterns are credential shapes with a vendor-specific prefix
+// that have no dedicated detector. Each is distinctive enough to match
+// without a keyword next to it, which is where the generic
+// bareCredentialKeywordRe cannot help: a key pasted into a log line or a
+// sentence. Where a pattern has a capture group, only the group is the
+// secret.
+//
+// They share one opaque token shape (tokenstore.EntityBearerToken)
+// instead of a look-alike each. The model rarely needs to know which
+// vendor a redacted key belongs to beyond what the text around it says,
+// and one shape keeps a new entry here to a single line.
+var vendorKeyPatterns = []*regexp.Regexp{
+	// Google OAuth client secret and access token.
+	regexp.MustCompile(`\bGOCSPX-[A-Za-z0-9_-]{28}\b`),
+	regexp.MustCompile(`\bya29\.[A-Za-z0-9_-]{30,}`),
+	// Hugging Face user access token.
+	regexp.MustCompile(`\bhf_[A-Za-z0-9]{34,40}\b`),
+	// Shopify access tokens (private app, custom app, shared secret, partner).
+	regexp.MustCompile(`\bshp(?:at|ca|pa|ss)_[0-9a-fA-F]{32}\b`),
+	// PyPI upload token: the fixed prefix is base64 of "pypi.org".
+	regexp.MustCompile(`\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,}`),
+	// Databricks personal access token.
+	regexp.MustCompile(`\bdapi[0-9a-f]{32}\b`),
+	// Slack app-level token (xox?- tokens have their own detector).
+	regexp.MustCompile(`\bxapp-\d-[A-Z0-9]{8,}-\d{10,}-[A-Za-z0-9]{32,}\b`),
+	// Telegram bot token: numeric bot id, then a 35-character secret.
+	regexp.MustCompile(`\b\d{8,10}:AA[A-Za-z0-9_-]{33}\b`),
+	// Discord bot token: base64 user id, timestamp, HMAC.
+	regexp.MustCompile(`\b[MNO][A-Za-z0-9_-]{23,25}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,38}\b`),
+	// Microsoft Entra (Azure AD) client secret.
+	regexp.MustCompile(`(?:^|[^A-Za-z0-9_~.-])([A-Za-z0-9_~.-]{3}\dQ~[A-Za-z0-9_~.-]{31,34})(?:$|[^A-Za-z0-9_~.-])`),
+	// Azure Storage shared access signature: the sig parameter is the
+	// credential; the rest of the URL is redacted as a URL already.
+	regexp.MustCompile(`[?&]sig=([A-Za-z0-9%+/]{40,}(?:=|%3[Dd]){0,2})`),
+}
+
+type vendorKeyDetector struct{}
+
+func (vendorKeyDetector) Detect(text string) ([]Detection, error) {
+	var out []Detection
+	for _, re := range vendorKeyPatterns {
+		for _, loc := range re.FindAllStringSubmatchIndex(text, -1) {
+			start, end := loc[0], loc[1]
+			if len(loc) >= 4 && loc[2] >= 0 {
+				start, end = loc[2], loc[3]
+			}
+			val := text[start:end]
+			if strings.Contains(val, tokenstore.TokenBearerPrefix) {
+				continue // already a token
+			}
+			out = append(out, simpleDetection(start, end, val, tokenstore.EntityBearerToken))
+		}
+	}
+	return out, nil
+}
+
+// --- Single-label internal hostnames --------------------------------------
+
+// A hostname with no dot ("appdbnode02", "internalhost07") is invisible
+// to the domain detector, which needs a public suffix, yet on an
+// internal network that is what most hosts are called. On its own such a
+// word is indistinguishable from any identifier, so it is recognised
+// only by position: as the host of a URL, or after "@" with a port.
+//
+// The scheme must be letters only, which keeps out the "h1://..." that a
+// go.sum hash can begin with, and a mixed-case label is skipped as an
+// encoded blob. Two further limits keep ordinary development text out: the label must
+// be at least five characters and contain a digit. That is how server
+// names are overwhelmingly written, and it excludes "localhost" and the
+// service names of a compose file ("db", "redis", "api", "web"). A host
+// named without a digit, and any mention outside these positions, still
+// needs `rules block`.
+var (
+	bareHostInURLRe      = regexp.MustCompile(`(?i)\b[a-z][a-z+.-]+://(?:[^\s/@]+@)?([a-z][a-z0-9-]{3,61}[a-z0-9])(?::\d{1,5})?(?:[^a-z0-9.:@-]|$)`)
+	bareHostAtPortRe     = regexp.MustCompile(`(?i)@([a-z][a-z0-9-]{3,61}[a-z0-9]):\d{1,5}\b`)
+	genericHostExampleRe = regexp.MustCompile(`^(?:host|hostname|myhost|server|example|node|machine)\d+$`)
+	domainTokenOnlyRe    = regexp.MustCompile(`^` + regexp.QuoteMeta(tokenstore.TokenDomainPrefix) + `[0-9a-f]{16}$`)
+)
+
+type bareHostDetector struct{}
+
+func (bareHostDetector) Detect(text string) ([]Detection, error) {
+	var out []Detection
+	for _, re := range []*regexp.Regexp{bareHostInURLRe, bareHostAtPortRe} {
+		for _, loc := range re.FindAllStringSubmatchIndex(text, -1) {
+			start, end := loc[2], loc[3]
+			orig := text[start:end]
+			label := strings.ToLower(orig)
+			if !strings.ContainsAny(label, "0123456789") || domainTokenOnlyRe.MatchString(label) ||
+				strings.HasPrefix(label, strings.ToLower(tokenstore.TokenConnStringMarker)) {
+				continue // no digit, or already one of this tool's own tokens
+			}
+			if orig != label && orig != strings.ToUpper(orig) {
+				continue // mixed case: an encoded blob or an identifier, not how hosts are written
+			}
+			if genericHostExampleRe.MatchString(label) {
+				continue // "host1", "server2": documentation stand-ins
+			}
+			// Stored as a domain so it gets a domain-shaped token, which
+			// is still a valid hostname where it stands; having no public
+			// suffix, it has no suffix to echo.
+			out = append(out, simpleDetection(start, end, label, tokenstore.EntityDomain))
+		}
+	}
+	return out, nil
+}

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -158,9 +159,11 @@ func (s *Server) proxySSE(w http.ResponseWriter, resp *http.Response, path strin
 		event, data, ok, err := readSSEFrame(reader)
 		if err != nil {
 			s.logger.Error("sse read error", "err", err)
+			s.flushOpenBlocks(w, flusher, blocks, path)
 			return
 		}
 		if !ok {
+			s.flushOpenBlocks(w, flusher, blocks, path)
 			return // clean EOF
 		}
 		if sseDebugTrace {
@@ -190,9 +193,14 @@ func (s *Server) proxySSE(w http.ResponseWriter, resp *http.Response, path strin
 			s.handleBlockDelta(w, flusher, event, data, evt, blocks, path)
 		case "content_block_stop":
 			s.handleBlockStop(w, flusher, event, data, evt, blocks, path)
+		case "message_delta", "message_stop", "error":
+			// Each ends the message (see flushOpenBlocks).
+			s.flushOpenBlocks(w, flusher, blocks, path)
+			writeSSEFrame(w, event, data)
+			flusher.Flush()
 		default:
-			// message_start, message_delta, message_stop, ping, and
-			// anything else: none carry redactable content.
+			// message_start, ping, and anything else: none carry
+			// redactable content.
 			writeSSEFrame(w, event, data)
 			flusher.Flush()
 		}
@@ -326,26 +334,64 @@ func (s *Server) handleBlockDelta(w http.ResponseWriter, flusher http.Flusher, e
 func (s *Server) handleBlockStop(w http.ResponseWriter, flusher http.Flusher, event, data string, evt map[string]any, blocks map[int]*blockState, path string) {
 	idx := indexOf(evt)
 	if st := blocks[idx]; st != nil {
-		switch st.blockType {
-		case "text":
-			if len(st.textBuf) > 0 {
-				s.emitTextDelta(w, flusher, idx, s.engine.Detokenize(string(st.textBuf)), path)
-			}
-		case "tool_use", "mcp_tool_use":
-			// Empty for an overflowed block (see handleBlockDelta's
-			// input_json_delta case: the buffer was emitted verbatim and
-			// reset, and every delta since went straight through), so
-			// nothing extra is emitted here and the client's reassembled
-			// JSON stays exactly what the upstream sent.
-			if raw := st.jsonBuf.String(); raw != "" {
-				detok := jsonwalk.DetokenizeValue([]byte(raw), s.engine.Detokenize)
-				s.emitInputJSONDelta(w, flusher, idx, string(detok), path)
-			}
-		}
+		s.flushBlock(w, flusher, idx, st, path)
 		delete(blocks, idx)
 	}
 	writeSSEFrame(w, event, data)
 	flusher.Flush()
+}
+
+// flushBlock emits whatever st still holds back, detokenized: the tail
+// of a text block, or a tool_use block's whole buffered input.
+func (s *Server) flushBlock(w http.ResponseWriter, flusher http.Flusher, idx int, st *blockState, path string) {
+	switch st.blockType {
+	case "text":
+		if len(st.textBuf) > 0 {
+			s.emitTextDelta(w, flusher, idx, s.engine.Detokenize(string(st.textBuf)), path)
+		}
+	case "tool_use", "mcp_tool_use":
+		// Empty for an overflowed block (see handleBlockDelta's
+		// input_json_delta case: the buffer was emitted verbatim and
+		// reset, and every delta since went straight through), so
+		// nothing extra is emitted here and the client's reassembled
+		// JSON stays exactly what the upstream sent. An input cut off
+		// mid-value isn't valid JSON, and DetokenizeValue returns it
+		// verbatim, still tokenized -- the same fail-open direction.
+		if raw := st.jsonBuf.String(); raw != "" {
+			detok := jsonwalk.DetokenizeValue([]byte(raw), s.engine.Detokenize)
+			s.emitInputJSONDelta(w, flusher, idx, string(detok), path)
+		}
+	}
+}
+
+// flushOpenBlocks flushes and forgets every block that never got its
+// content_block_stop, in index order.
+//
+// The message can end with a block still open: a refusal can cut the
+// response off mid-block, an error event can arrive mid-stream, or the
+// connection can simply close. Without this, whatever a block was still
+// holding back -- up to a whole token at the end of a text block, or a
+// tool call's entire input -- was silently dropped, so the client saw a
+// shorter partial than the upstream sent. Beyond being wrong on screen,
+// that breaks the refusal-fallback path: Claude Code echoes the partial
+// back to continue on a fallback model, and the echo must match what the
+// API produced. Called before forwarding the frame that ends the
+// message, so the client gets the held-back text before learning the
+// message is over; in a normal stream every block is already closed by
+// then and this is a no-op.
+func (s *Server) flushOpenBlocks(w http.ResponseWriter, flusher http.Flusher, blocks map[int]*blockState, path string) {
+	if len(blocks) == 0 {
+		return
+	}
+	idxs := make([]int, 0, len(blocks))
+	for idx := range blocks {
+		idxs = append(idxs, idx)
+	}
+	slices.Sort(idxs)
+	for _, idx := range idxs {
+		s.flushBlock(w, flusher, idx, blocks[idx], path)
+		delete(blocks, idx)
+	}
 }
 
 func (s *Server) emitTextDelta(w io.Writer, flusher http.Flusher, index int, text string, path string) {

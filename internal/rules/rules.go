@@ -299,14 +299,24 @@ func (c *Config) Save(path string) error {
 // is comparatively harmless (compileEntry anchors it "^$", matching
 // only the empty string) but just as clearly not a real rule someone
 // meant to write, so it's rejected the same way for consistency.
+//
+// A regex that can match the empty string ("x*", "(?i)", "a?") is the
+// same mistake in regex form, and worse on the allow side: patterns are
+// unanchored, so it matches inside every real value and silently turns
+// redaction off for the whole engagement. On the block side it makes
+// every request fail. Both are rejected.
 func (c *Config) Validate() error {
 	for i, e := range c.Block {
 		if e.Value == "" {
 			return fmt.Errorf("block[%d]: empty value -- as a non-regex entry this would match every possible input", i)
 		}
 		if e.Regex {
-			if _, err := regexp.Compile(e.Value); err != nil {
+			re, err := regexp.Compile(e.Value)
+			if err != nil {
 				return fmt.Errorf("block[%d] (%q): invalid regex: %w", i, e.Value, err)
+			}
+			if re.MatchString("") {
+				return fmt.Errorf("block[%d] (%q): regex matches the empty string, so it matches everywhere -- every request would fail to redact", i, e.Value)
 			}
 		}
 	}
@@ -315,8 +325,12 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("allow[%d]: empty value", i)
 		}
 		if e.Regex {
-			if _, err := regexp.Compile(e.Value); err != nil {
+			re, err := regexp.Compile(e.Value)
+			if err != nil {
 				return fmt.Errorf("allow[%d] (%q): invalid regex: %w", i, e.Value, err)
+			}
+			if re.MatchString("") {
+				return fmt.Errorf("allow[%d] (%q): regex matches the empty string, so it matches everywhere -- it would switch redaction off for every value", i, e.Value)
 			}
 		}
 	}
