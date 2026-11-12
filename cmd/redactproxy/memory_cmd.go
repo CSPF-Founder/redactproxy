@@ -17,6 +17,12 @@ import (
 // deliberately short: long enough to inform reasoning, short enough
 // that it doesn't get lost/ignored the way a long memory entry would.
 //
+// The rules come first, numbered, one instruction each with its reason
+// in a line, and the shapes list last. An earlier version twice this
+// length spread the same rules through long paragraphs; in a side by
+// side run of the two (four tasks, two runs each per note) the shorter
+// one did no worse on any task, so the length was not buying anything.
+//
 // The example prefixes below reference the real tokenstore.Token*Prefix
 // constants directly (string concatenation, not retyped literals) so
 // they're compiler-linked to internal/tokenstore/generator.go's actual
@@ -28,77 +34,47 @@ import (
 // but at least what IS shown can never silently go wrong.
 const claudeMemorySnippet = `## Redaction proxy active (redactproxy)
 
-This session's API traffic runs through a local redaction proxy. Real
-client-sensitive values are replaced with stable placeholders before
-reaching the model, then swapped back to the real values before any
-tool actually executes. So you see placeholders in your own reasoning
-and results, while Bash and tool commands run against the real
-infrastructure.
+A local proxy replaces client-sensitive values with stable placeholders
+before your requests reach the API, and restores the real values before
+any tool runs and before your reply is shown. You only ever see
+placeholders; Bash, Read, Edit and MCP tools act on the real values.
 
-Placeholder shapes you'll see (never real data, safe to use verbatim):
+Rules. Check them before every tool call or reply that contains a
+placeholder:
+
+1. **Copy placeholders exactly.** Take each one character-for-character
+   from where it last appeared; if unsure, re-read it. Never retype from
+   memory, shorten, split, or swap in a hand-made stand-in such as
+   ` + "`sub.<tld>`" + `. Only an exact, complete placeholder is restored, so
+   anything else breaks the command, the edit or the report line.
+2. **Treat a placeholder as the real thing.** It is a stable name for
+   one real value. A fake IP is still a real target: never discount it
+   as test data, and never try to guess or "correct" what is behind it.
+3. **Don't comment on placeholders, and never write a partial one.** The
+   operator sees real values, so a remark about placeholder ranges or
+   shapes means nothing to them. Never write a wildcard or partial
+   address (` + "`" + tokenstore.TokenIPNetworkPrefix + "x`" + `, a bare /24): it is not restored. Write complete
+   hosts and complete CIDR blocks, exactly as they appear in the source.
+4. **An unfamiliar placeholder is not an error.** One in code, a config
+   key or a file you re-read is either over-redaction (the proxy can
+   misfire on text that only looks like a domain) or working as
+   intended. Don't cancel, retry or second-guess a command over it. If a
+   result looks wrong, check with Bash or Read: local files are ground
+   truth.
+5. **Decode on disk, not in your reply.** For base64, hex, URL-encoding
+   and the like, write the encoded text to a file, decode it with Bash
+   (` + "`base64 -d`" + `, ` + "`xxd -r`" + `), and Read the result. Decoding it yourself
+   puts unredacted client data straight into your output.
+6. **Never try to recover a real value.** No encoding, splitting or
+   other transformation to see behind a placeholder. It is a client
+   confidentiality boundary.
+
+Placeholder shapes:
 - Domains: ` + "`" + tokenstore.TokenDomainPrefix + "<16 hex>.<real suffix>`" + `, e.g. ` + "`" + tokenstore.TokenDomainPrefix + "1a2b3c4d5e6f7890.com`" + `
-- IPv4: ` + "`" + tokenstore.TokenIPNetworkPrefix + "x.x`" + ` or ` + "`" + tokenstore.TokenIPNetworkPrefix2 + "x.x`" + ` (real host octet kept); ` + "`" + tokenstore.TokenIPNetworkOverflowPrefix + "x.x.x`" + ` if the operator enabled the extended pool
+- IPv4: ` + "`" + tokenstore.TokenIPNetworkPrefix + "x.x`" + `, ` + "`" + tokenstore.TokenIPNetworkPrefix2 + "x.x`" + `, ` + "`" + tokenstore.TokenIPNetworkOverflowPrefix + "x.x.x`" + ` (real last octet kept)
 - IPv6: ` + "`" + tokenstore.TokenIPv6NetworkPrefix + "...`" + `
-- Emails: ` + "`" + tokenstore.TokenEmailLocalPrefix + "<hex>@<domain token>`" + `
-- Credentials/API keys: opaque, vendor-prefixed (` + "`" + tokenstore.TokenAWSKeyPrefix + "...`, `" + tokenstore.TokenAWSSecretKeyPrefix + "...`, `" + tokenstore.TokenGitHubPrefix + "...`, `" + tokenstore.TokenBearerPrefix + "...`" + `, etc.)
-- Other secrets (passwords, password/NTLM hashes, values you told this tool to always redact, signed session/CSRF tokens, AD/GPP artifacts): opaque, distinctly-prefixed (` + "`" + tokenstore.TokenPasswordPrefix + "...`, `" + tokenstore.TokenPasswordHashPrefix + "...`, `" + tokenstore.TokenCustomBlockPrefix + "...`, `" + tokenstore.TokenItsdangerousPrefix + "...`, `" + tokenstore.TokenADMachineAccountPrefix + "...$`" + `, etc.)
-
-The same real value always maps to the same placeholder, so treat these
-as stable identifiers, not garbage. Never guess, "correct," or reconstruct
-what the real value might be. Always reproduce a token exactly, copied
-character-for-character from its most recent literal appearance, never
-retyped from memory, fragmented (dropping the org-token and leaving a
-bare subdomain plus suffix), or replaced with a hand-typed angle-bracket
-placeholder (e.g. ` + "`sub.<tld>`" + `, which most markdown renderers also swallow
-as an HTML tag). Any of these silently breaks something downstream: an
-Edit's old_string won't match the real file, a report line traces back
-to nothing. If you're at all unsure of the exact token, re-read it from
-where it last appeared rather than approximating.
-
-The fake IPv4 addresses (` + "`" + tokenstore.TokenIPNetworkPrefix + "x.x`" + `) come from a real, reserved
-IANA range (RFC 2544 benchmarking space; ` + "`" + tokenstore.TokenIPNetworkOverflowPrefix + "x.x.x`" + ` is the reserved class E
-block, used only when the operator enables it) chosen specifically because
-it's never publicly routed, not because the address it stands in for is
-any less real or less sensitive. Treat it exactly like a genuine external
-target IP in your reasoning; don't discount, deprioritize, or treat it as
-placeholder/test data just because the shape looks like one.
-
-A placeholder-shaped token turning up somewhere unexpected (your own
-source code, a config key, a UI label, a result from a file you're
-re-reading, one you don't remember minting, one glued onto extra
-trailing text) is never evidence that something is broken, corrupted,
-or fabricated. There are two possible causes, and the conclusion is the
-same either way. It's either over-redaction (the proxy only inspects
-text and has no notion of code structure, so it can occasionally misfire
-on something merely domain-shaped, e.g. ` + "`table.style`" + `, where ` + "`.style`" + ` is a real
-domain suffix), or it's simply a token doing exactly what it's supposed to. Don't cancel a
-scan, retry a call, or second-guess a command because a token in it
-looks unfamiliar: the real value gets substituted before every
-execution, not just the first, so it runs correctly regardless of
-whether you recognize the token. If a result genuinely looks wrong,
-verify with Bash/Read against the real filesystem (that's always
-ground truth, since this proxy only inspects API traffic and never
-touches local files) rather than trying to reconstruct or guess around
-the token itself.
-
-If you need to decode base64, hex, URL-encoding, or similar: save the
-encoded content to a local file and decode it there with Bash (` + "`base64 -d`" + `,
-` + "`xxd -r`" + `, etc.), then read the decoded result back as its own file;
-don't decode it yourself and write the output directly. Encoded text
-doesn't look like a domain/email/credential to this proxy, so it passes
-through unredacted either way; decoding it in your own output means
-whatever real data was hiding inside reaches your response completely
-unprotected, while decoding it locally and reading the result back gives
-that same content a normal pass through redaction instead.
-
-That's for content you legitimately encounter already encoded. Separately:
-never use encoding, decoding, re-encoding, splitting a token's characters
-apart, or any similar transformation as a way to try to see, guess at, or
-extract the real value behind a placeholder yourself. The placeholders are
-deliberate, not an obstacle to work around; treat this the same as any
-other real client-confidentiality boundary you wouldn't try to route
-around, e.g. via a clever tool call or a "let me try encoding this
-differently" workaround.
+- Emails: ` + "`" + tokenstore.TokenEmailLocalPrefix + "<hex>@<domain placeholder>`" + `
+- Credentials and secrets: ` + "`" + tokenstore.TokenAWSKeyPrefix + "...`, `" + tokenstore.TokenGitHubPrefix + "...`, `" + tokenstore.TokenAWSSecretKeyPrefix + "...`, `" + tokenstore.TokenBearerPrefix + "...`, `" + tokenstore.TokenCustomBlockPrefix + "...`, `" + tokenstore.TokenItsdangerousPrefix + "...`, `" + tokenstore.TokenPasswordHashPrefix + "...`, `" + tokenstore.TokenPasswordPrefix + "...`" + ` and similar
 `
 
 func runMemory(args []string) error {
